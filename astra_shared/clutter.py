@@ -309,19 +309,31 @@ def _lookup_state_like(reference_state, value: str):
     return LookupState(value)
 
 
+def _coerce_class_id(class_id):
+    """An integral class id becomes an int; anything else is left as it is.
+
+    int() would truncate 50.9 into 50 and route it as built-up.  A code the
+    routing table does not hold must become unknown_class instead (spec
+    section 5.4), so a non-integral value is kept, and the membership test
+    against VALID_CLUTTER_CLASS_IDS then fails as it should.
+    """
+    if class_id is None:
+        return None
+    try:
+        as_float = float(class_id)
+    except (TypeError, ValueError):
+        return class_id
+    return int(as_float) if as_float.is_integer() else class_id
+
+
 def _coerce_lookup_for_eval(lookup):
     if all(hasattr(lookup, attr) for attr in ("class_id", "lookup_state", "class_label")):
         state = LookupState(_lookup_state_value(lookup.lookup_state))
-        class_id = lookup.class_id
-        if class_id is not None:
-            class_id = int(class_id)
-        return ClutterLookup(state, class_id, str(lookup.class_label))
+        return ClutterLookup(state, _coerce_class_id(lookup.class_id), str(lookup.class_label))
     if isinstance(lookup, tuple) and len(lookup) == 3:
         state, class_id, label = lookup
         state = LookupState(_lookup_state_value(state))
-        if class_id is not None:
-            class_id = int(class_id)
-        return ClutterLookup(state, class_id, str(label))
+        return ClutterLookup(state, _coerce_class_id(class_id), str(label))
     raise TypeError("lookup must provide class_id, lookup_state, and class_label")
 
 
@@ -360,19 +372,20 @@ def evaluate_clutter_loss(lookup, config: ClutterConfig, freq_hz: float, elevati
     if model == ClutterModel.DISABLED:
         return ClutterResult(0.0, class_id, lookup_result.class_label, ClutterBranch.NONE, lookup_state)
 
-    f_ghz = float(freq_hz) / 1.0e9
-    if not (P2108_F_MIN_GHZ <= f_ghz <= P2108_F_MAX_GHZ):
-        return ClutterResult(0.0, class_id, lookup_result.class_label, ClutterBranch.NONE, lookup_state)
-
     raw_elev = float(elevation_deg)
     # Spec section 4.5: mask on visibility first, then clamp.  This evaluator
     # has no mask, so its caller must only call it for an admitted link, and
     # an admitted link has elevation >= min_el_deg >= 0.  An angle below 0 is
     # therefore a skipped visibility check, not a link: clamping it to the
     # 5 deg floor would report ~22.6 dB of built-up clutter for a satellite
-    # that is not in view.  Refuse it instead.
+    # that is not in view.  Refuse it instead -- before the frequency window,
+    # so an out-of-window run does not hide the caller's mistake behind 0 dB.
     if not np.isfinite(raw_elev) or not (0.0 <= raw_elev <= 90.0):
         raise ValueError("elevation outside 0-90 degrees")
+
+    f_ghz = float(freq_hz) / 1.0e9
+    if not (P2108_F_MIN_GHZ <= f_ghz <= P2108_F_MAX_GHZ):
+        return ClutterResult(0.0, class_id, lookup_result.class_label, ClutterBranch.NONE, lookup_state)
 
     branch = _branch_for_class(class_id) if lookup_state == LookupState.CLASS else ClutterBranch.NONE
     eval_elev = max(raw_elev, CLUTTER_ELEV_FLOOR_DEG)

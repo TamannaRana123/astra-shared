@@ -230,7 +230,9 @@ def test_monotonicity_and_documented_canopy_zenith_reversal():
             values = [clutter_loss_p2108(freq, elev, float(p)) for p in p_values]
             assert values == sorted(values)
 
-    for freq in (1.2, 2.0, 10.0):
+    # Spec section 9: canopy is monotone in p for every f >= 1.2 GHz, across the
+    # whole 0.5-100 GHz window -- not only near the 1.2 GHz edge.
+    for freq in (1.2, 2.0, 10.0, 20.0, 30.0, 60.0, 100.0):
         for elev in (0.0, 5.0, 20.0, 45.0, 80.0, 90.0):
             values = [clutter_loss_p833(freq, elev, float(p)) for p in p_values]
             assert values == sorted(values)
@@ -575,6 +577,142 @@ def test_array_evaluator_checks_percentile_outside_frequency_window():
             cfg,
             120_000_000_000.0,
         )
+
+
+# ----------------------------------------------------------------------------
+# The configured percentile has to reach the arithmetic.  Every check below uses
+# p away from 50 and elevations away from the zenith, because those are the two
+# places a wrong percentile is invisible: at p = 50, p and 100 - p give the same
+# answer, and at 90 deg the base term is raised to the power zero.
+# ----------------------------------------------------------------------------
+
+_OFF_MEDIAN = (1.0, 20.0, 80.0, 99.0)
+_OFF_ZENITH = np.array([5.0, 12.5, 30.0, 60.0, 85.0])
+
+
+@pytest.mark.parametrize("p_pct", _OFF_MEDIAN)
+@pytest.mark.parametrize("f_ghz", (2.0, 20.0, 60.0))
+@pytest.mark.parametrize(
+    ("array_helper", "scalar_helper"),
+    [
+        (clutter_loss_p2108_arr, clutter_loss_p2108),
+        (clutter_loss_p833_arr, clutter_loss_p833),
+    ],
+)
+def test_array_helpers_match_scalar_away_from_the_median(array_helper, scalar_helper, f_ghz, p_pct):
+    loss, mask = array_helper(f_ghz, _OFF_ZENITH, np.ones(_OFF_ZENITH.size, dtype=bool), p_pct)
+    assert mask.all()
+    expected = [scalar_helper(f_ghz, float(e), p_pct) for e in _OFF_ZENITH]
+    assert loss.tolist() == pytest.approx(expected, abs=1e-9)
+
+
+def test_the_percentile_changes_the_answer_at_every_checked_point():
+    """Guard the guard: the points above must actually be sensitive to p."""
+    for helper in (clutter_loss_p2108, clutter_loss_p833):
+        for e in _OFF_ZENITH:
+            at_median = helper(20.0, float(e), 50.0)
+            for p in _OFF_MEDIAN:
+                assert abs(helper(20.0, float(e), p) - at_median) > 0.05, (helper.__name__, e, p)
+
+
+@pytest.mark.parametrize("p_pct", _OFF_MEDIAN)
+@pytest.mark.parametrize(
+    ("class_id", "helper"), [(50, clutter_loss_p2108), (10, clutter_loss_p833), (95, clutter_loss_p833)]
+)
+def test_scalar_evaluator_uses_the_configured_percentile(class_id, helper, p_pct):
+    lookup = ClutterLookup(LookupState.CLASS, class_id, "x")
+    result = evaluate_clutter_loss(lookup, ClutterConfig(clutter_percentile=p_pct), 20e9, 20.0)
+    assert result.loss_db == pytest.approx(helper(20.0, 20.0, p_pct), abs=1e-12)
+
+
+@pytest.mark.parametrize("p_pct", _OFF_MEDIAN)
+def test_array_evaluator_uses_the_configured_percentile(p_pct):
+    classes = [50, 10, 95, 30]
+    states = [LookupState.CLASS] * 4
+    elev = [20.0, 20.0, 45.0, 20.0]
+    visible = [True] * 4
+    expected = [
+        clutter_loss_p2108(20.0, 20.0, p_pct),
+        clutter_loss_p833(20.0, 20.0, p_pct),
+        clutter_loss_p833(20.0, 45.0, p_pct),
+        0.0,
+    ]
+    cfg = ClutterConfig(clutter_percentile=p_pct)
+    direct, _ = evaluate_clutter_arr(classes, states, elev, visible, cfg, 20e9)
+    bound, _ = make_clutter_arr_evaluator(cfg, 20e9)(classes, states, elev, visible)
+    assert direct.tolist() == pytest.approx(expected, abs=1e-12)
+    assert bound.tolist() == pytest.approx(expected, abs=1e-12)
+
+
+def test_two_percentiles_at_one_coordinate_each_get_their_own_value():
+    """Spec section 9 cache tests: the percentile is per run, not per coordinate."""
+    lookup = ClutterLookup(LookupState.CLASS, 50, "Built-up")
+    low = evaluate_clutter_loss(lookup, ClutterConfig(clutter_percentile=20.0), 20e9, 20.0).loss_db
+    high = evaluate_clutter_loss(lookup, ClutterConfig(clutter_percentile=80.0), 20e9, 20.0).loss_db
+    again = evaluate_clutter_loss(lookup, ClutterConfig(clutter_percentile=20.0), 20e9, 20.0).loss_db
+    assert high > low
+    assert again == low
+
+
+# ----------------------------------------------------------------------------
+# Spec section 5.4: the frequency window short-circuits at BOTH ends, in both
+# forms.  Outside it the evaluator returns 0 dB without calling a helper, which
+# would otherwise raise ValueError from inside the RF path.
+# ----------------------------------------------------------------------------
+
+_OUTSIDE_WINDOW_HZ = (0.3e9, 0.4999e9, 100.0001e9, 120e9)
+
+
+@pytest.mark.parametrize("freq_hz", _OUTSIDE_WINDOW_HZ)
+@pytest.mark.parametrize("class_id", [50, 10, 95])
+def test_scalar_evaluator_short_circuits_outside_the_window(class_id, freq_hz):
+    result = evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig(), freq_hz, 20.0)
+    assert result.loss_db == 0.0
+    assert result.branch == ClutterBranch.NONE
+    assert result.class_id == class_id
+    assert result.lookup_state == LookupState.CLASS
+
+
+@pytest.mark.parametrize("freq_hz", _OUTSIDE_WINDOW_HZ)
+def test_array_evaluator_short_circuits_outside_the_window(freq_hz):
+    loss, mask = evaluate_clutter_arr(
+        [50, 10, 95], [LookupState.CLASS] * 3, [20.0, 20.0, 20.0], [True] * 3, ClutterConfig(), freq_hz
+    )
+    assert loss.tolist() == [0.0, 0.0, 0.0]
+    assert mask.tolist() == [True, True, True]
+
+
+@pytest.mark.parametrize("freq_hz", (0.5e9, 100.0e9))
+def test_both_window_edges_are_inside(freq_hz):
+    """The must-pass half: 0.5 and 100 GHz are evaluated, not short-circuited."""
+    f_ghz = freq_hz / 1e9
+    result = evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, 50, "x"), ClutterConfig(), freq_hz, 20.0)
+    assert result.branch == ClutterBranch.P2108
+    assert result.loss_db == pytest.approx(clutter_loss_p2108(f_ghz, 20.0, 50.0), abs=1e-12)
+    loss, _ = evaluate_clutter_arr([50], [LookupState.CLASS], [20.0], [True], ClutterConfig(), freq_hz)
+    assert loss[0] == pytest.approx(clutter_loss_p2108(f_ghz, 20.0, 50.0), abs=1e-12)
+
+
+@pytest.mark.parametrize("freq_hz", (0.3e9, 120e9))
+@pytest.mark.parametrize("elevation", (-30.0, float("nan")))
+def test_below_horizon_is_refused_outside_the_window_too(freq_hz, elevation):
+    """A skipped visibility check is the caller's bug at any frequency."""
+    with pytest.raises(ValueError, match="elevation outside 0-90 degrees"):
+        evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, 50, "x"), ClutterConfig(), freq_hz, elevation)
+
+
+@pytest.mark.parametrize("class_id", [50.9, 10.5, "50x"])
+def test_a_non_integral_class_code_is_unknown_not_truncated(class_id):
+    result = evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig(), 20e9, 20.0)
+    assert result.lookup_state == LookupState.UNKNOWN_CLASS
+    assert result.branch == ClutterBranch.NONE
+    assert result.loss_db == 0.0
+
+
+def test_an_integral_float_class_code_is_still_that_class():
+    result = evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, 50.0, "x"), ClutterConfig(), 20e9, 20.0)
+    assert result.class_id == 50
+    assert result.branch == ClutterBranch.P2108
 
 
 def test_disabled_config_carries_no_percentile():
