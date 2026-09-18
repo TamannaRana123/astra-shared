@@ -961,3 +961,241 @@ def test_shared_vector_elevation_degenerate_geometry_is_nan():
     scalar = compute_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
     assert scalar == 0.0
     assert np.isnan(vector[0])
+
+
+# ----------------------------------------------------------------------------
+# Spec section 5.5: how each real failure becomes a lookup state.
+#
+# Every other test patches fetch_worldcover_class out, so none of them runs the
+# code that decides which state a failure is.  These drive the real function
+# through each of its exits.  The state matters twice over: it picks the
+# notice (section 4.6), and it decides whether the result is cached for the
+# life of the worker (section 5.5) -- a transient failure recorded as a
+# cacheable state pins that coordinate at 0 dB until restart.
+# ----------------------------------------------------------------------------
+
+import astra_shared.worldcover as _wc  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+class _FakeDataset:
+    def __init__(self, value):
+        self._value = value
+
+    def index(self, x, y):
+        return 0, 0
+
+    def read(self, band, window=None):
+        return np.array([[self._value]])
+
+
+class _IdentityTransformer:
+    def transform(self, lon, lat):
+        return lon, lat
+
+
+@pytest.fixture
+def real_fetch(monkeypatch, tmp_path):
+    """fetch_worldcover_class with its collaborators replaced, and nothing else.
+
+    Window is set explicitly because worldcover imports it only when rasterio
+    is installed; without it a "successful" read would raise NameError inside
+    the try and come back as read_failed, hiding the case under test.
+    """
+    monkeypatch.setattr(_wc, "HAS_RASTERIO", True)
+    monkeypatch.setattr(_wc, "Window", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(_wc, "_mark_tile_known_local", lambda name: None)
+    monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: False)
+    monkeypatch.setattr(_wc, "_is_tile_not_on_s3", lambda name: False)
+
+    def reader_returning(value):
+        @contextmanager
+        def _reader(path):
+            yield _FakeDataset(value), _IdentityTransformer()
+        return _reader
+
+    def fetch(**overrides):
+        kwargs = {"worldcover_dir": tmp_path, "download_if_missing": True}
+        kwargs.update(overrides)
+        return _wc.fetch_worldcover_class(12.0, 77.0, **kwargs)
+
+    fetch.reader_returning = reader_returning
+    return fetch
+
+
+def test_real_fetch_rasterio_unavailable(monkeypatch, real_fetch):
+    monkeypatch.setattr(_wc, "HAS_RASTERIO", False)
+    assert real_fetch().lookup_state == LookupState.RASTERIO_UNAVAILABLE
+
+
+def test_real_fetch_tile_known_absent_is_not_published(monkeypatch, real_fetch):
+    """Not tile_missing: that would raise the data-unavailable notice on every coastal grid."""
+    monkeypatch.setattr(_wc, "_is_tile_not_on_s3", lambda name: True)
+    assert real_fetch().lookup_state == LookupState.TILE_NOT_PUBLISHED
+
+
+def test_real_fetch_download_finds_no_tile_is_not_published(monkeypatch, real_fetch):
+    monkeypatch.setattr(_wc, "ensure_worldcover_tile", lambda *a, **k: None)
+    assert real_fetch().lookup_state == LookupState.TILE_NOT_PUBLISHED
+
+
+def test_real_fetch_download_error_is_read_failed(monkeypatch, real_fetch):
+    """Transient, so uncacheable -- not tile_not_published, which would be cached."""
+    def boom(*a, **k):
+        raise RuntimeError("WorldCover download failed (HTTP 503)")
+    monkeypatch.setattr(_wc, "ensure_worldcover_tile", boom)
+    assert real_fetch().lookup_state == LookupState.READ_FAILED
+
+
+def test_real_fetch_no_download_and_no_file_is_tile_missing(monkeypatch, real_fetch):
+    def must_not_download(*a, **k):
+        raise AssertionError("download_if_missing=False must not download")
+    monkeypatch.setattr(_wc, "ensure_worldcover_tile", must_not_download)
+    assert real_fetch(download_if_missing=False).lookup_state == LookupState.TILE_MISSING
+
+
+def test_real_fetch_read_error_is_read_failed(monkeypatch, real_fetch):
+    """Transient, so uncacheable -- not no_data_pixel, which would be cached."""
+    monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
+
+    @contextmanager
+    def broken_reader(path):
+        raise OSError("partial file")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(_wc, "tile_reader", broken_reader)
+    assert real_fetch().lookup_state == LookupState.READ_FAILED
+
+
+def test_real_fetch_zero_pixel_is_no_data(monkeypatch, real_fetch):
+    monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
+    monkeypatch.setattr(_wc, "tile_reader", real_fetch.reader_returning(0))
+    result = real_fetch()
+    assert result.lookup_state == LookupState.NO_DATA_PIXEL
+    assert result.class_id is None
+
+
+@pytest.mark.parametrize(("value", "label"), [(50, "Built-up"), (10, "Tree cover"), (999, "Unknown (999)")])
+def test_real_fetch_pixel_is_its_class(monkeypatch, real_fetch, value, label):
+    """An unmapped code stays `class` here; unknown_class is derived above the lookup."""
+    monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
+    monkeypatch.setattr(_wc, "tile_reader", real_fetch.reader_returning(value))
+    result = real_fetch()
+    assert result.lookup_state == LookupState.CLASS
+    assert result.class_id == value
+    assert result.class_label == label
+
+
+def test_real_fetch_downloaded_tile_is_read(monkeypatch, real_fetch, tmp_path):
+    """The download path hands the downloaded file to the reader."""
+    downloaded = tmp_path / "downloaded.tif"
+    seen = {}
+    monkeypatch.setattr(_wc, "ensure_worldcover_tile", lambda *a, **k: downloaded)
+
+    @contextmanager
+    def reader(path):
+        seen["path"] = path
+        yield _FakeDataset(50), _IdentityTransformer()
+
+    monkeypatch.setattr(_wc, "tile_reader", reader)
+    assert real_fetch().class_id == 50
+    assert seen["path"] == downloaded
+
+
+@pytest.mark.parametrize(
+    ("setup", "cached"),
+    [("read_error", False), ("download_error", False), ("not_published", True), ("zero_pixel", True)],
+)
+def test_real_failures_reach_the_cache_correctly(monkeypatch, real_fetch, setup, cached):
+    """End to end: a real failure, through the real lookup, into the real cache."""
+    clear_clutter_cache()
+    if setup == "read_error":
+        monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
+
+        @contextmanager
+        def broken(path):
+            raise OSError("locked")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(_wc, "tile_reader", broken)
+    elif setup == "download_error":
+        def boom(*a, **k):
+            raise RuntimeError("timeout")
+        monkeypatch.setattr(_wc, "ensure_worldcover_tile", boom)
+    elif setup == "not_published":
+        monkeypatch.setattr(_wc, "_is_tile_not_on_s3", lambda name: True)
+    else:
+        monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
+        monkeypatch.setattr(_wc, "tile_reader", real_fetch.reader_returning(0))
+    lookup_worldcover_class(12.0, 77.0)
+    assert bool(_CLUTTER_CACHE) is cached
+    clear_clutter_cache()
+
+
+def test_lookup_clutter_arr_passes_download_if_missing_through(monkeypatch):
+    clear_clutter_cache()
+    seen = []
+
+    def fake_fetch(lat, lon, worldcover_dir=None, download_if_missing=True):
+        seen.append(download_if_missing)
+        return ClutterLookup(LookupState.TILE_MISSING, None, "Unknown")
+
+    monkeypatch.setattr(_wc, "fetch_worldcover_class", fake_fetch)
+    lookup_clutter_arr(np.array([1.0, 2.0]), np.array([3.0, 4.0]), download_if_missing=False)
+    assert seen == [False, False]
+
+
+# ----------------------------------------------------------------------------
+# Spec sections 4.5 and 5.3: the grid evaluator must honour the caller's mask.
+# ----------------------------------------------------------------------------
+
+def test_array_evaluator_honours_the_callers_visibility_mask():
+    """A point the caller masked contributes 0 dB, even at an elevation the clip would lift.
+
+    Replacing the caller's mask with np.isfinite(elev) inside the evaluator
+    would return 22.56 dB for a built-up point at -30 deg that is not in view:
+    the clamp-in-place-of-mask defect, in the function Phase 2 calls.
+    """
+    classes = [50, 10, 50, 10, 50, 10]
+    states = [LookupState.CLASS] * 6
+    elev = np.array([-30.0, -30.0, 3.0, 3.0, 20.0, 20.0])
+    visible = np.array([False, False, False, False, True, True])
+    loss, mask = evaluate_clutter_arr(classes, states, elev, visible, ClutterConfig(), 20e9)
+    assert loss.tolist() == pytest.approx(
+        [0.0, 0.0, 0.0, 0.0, clutter_loss_p2108(20.0, 20.0, 50.0), clutter_loss_p833(20.0, 20.0, 50.0)],
+        abs=1e-12,
+    )
+    assert mask.tolist() == (visible & np.isfinite(elev)).tolist()
+
+
+# ----------------------------------------------------------------------------
+# Smaller contracts
+# ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("class_id", [50, 10, 95, 30])
+def test_disabled_scalar_evaluator_produces_no_branch(class_id):
+    """Spec section 5.4: disabled means no clutter term at all, and the branch says so."""
+    result = evaluate_clutter_loss(
+        ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig("disabled", None), 20e9, 20.0
+    )
+    assert result.loss_db == 0.0
+    assert result.branch == ClutterBranch.NONE
+
+
+@pytest.mark.parametrize("p_pct", (1e-15, 1e-12))
+@pytest.mark.parametrize(
+    ("array_helper", "scalar_helper"),
+    [(clutter_loss_p2108_arr, clutter_loss_p2108), (clutter_loss_p833_arr, clutter_loss_p833)],
+)
+def test_array_matches_scalar_at_tiny_percentiles(array_helper, scalar_helper, p_pct):
+    """Spec section 5.2 item 6: both forms give the same value, including where cancellation bites."""
+    loss, _ = array_helper(20.0, _OFF_ZENITH, np.ones(_OFF_ZENITH.size, dtype=bool), p_pct)
+    expected = [scalar_helper(20.0, float(e), p_pct) for e in _OFF_ZENITH]
+    assert loss.tolist() == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.parametrize(("class_id", "freq_hz"), [(80, 20e9), (30, 20e9), (50, 120e9), (50, 0.3e9)])
+def test_evaluator_refuses_above_zenith_without_help_from_a_helper(class_id, freq_hz):
+    """The evaluator's own bound: open ground and out-of-window runs never reach a helper."""
+    with pytest.raises(ValueError, match="elevation outside 0-90 degrees"):
+        evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig(), freq_hz, 120.0)
