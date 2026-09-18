@@ -1106,8 +1106,14 @@ def test_real_fetch_downloaded_tile_is_read(monkeypatch, real_fetch, tmp_path):
     ("setup", "cached"),
     [("read_error", False), ("download_error", False), ("not_published", True), ("zero_pixel", True)],
 )
-def test_real_failures_reach_the_cache_correctly(monkeypatch, real_fetch, setup, cached):
-    """End to end: a real failure, through the real lookup, into the real cache."""
+def test_real_failures_reach_the_cache_correctly(monkeypatch, real_fetch, tmp_path, setup, cached):
+    """End to end: a real failure, through the real lookup, into the real cache.
+
+    worldcover_dir is pinned to an empty tmp_path.  Left to default it reads the
+    machine's WORLDCOVER_DIR, where an installed tile skips the download branch
+    entirely -- so on a developer's machine the download_error case could pass
+    against a broken mapping, or fail against a correct one.
+    """
     clear_clutter_cache()
     if setup == "read_error":
         monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
@@ -1127,7 +1133,7 @@ def test_real_failures_reach_the_cache_correctly(monkeypatch, real_fetch, setup,
     else:
         monkeypatch.setattr(_wc, "_is_tile_known_local", lambda name: True)
         monkeypatch.setattr(_wc, "tile_reader", real_fetch.reader_returning(0))
-    lookup_worldcover_class(12.0, 77.0)
+    lookup_worldcover_class(12.0, 77.0, worldcover_dir=tmp_path)
     assert bool(_CLUTTER_CACHE) is cached
     clear_clutter_cache()
 
@@ -1199,3 +1205,100 @@ def test_evaluator_refuses_above_zenith_without_help_from_a_helper(class_id, fre
     """The evaluator's own bound: open ground and out-of-window runs never reach a helper."""
     with pytest.raises(ValueError, match="elevation outside 0-90 degrees"):
         evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig(), freq_hz, 120.0)
+
+
+# ----------------------------------------------------------------------------
+# Round-3 review: paths production runs that nothing exercised.
+# ----------------------------------------------------------------------------
+
+def test_real_fetch_installed_tile_not_yet_known_is_read(monkeypatch, real_fetch, tmp_path):
+    """The first lookup on each installed tile after every worker start.
+
+    The known-local set lives in memory, so after a restart an installed tile
+    is not in it, and the lookup takes the file-exists branch.  That branch
+    must read the tile -- not report it missing, and not download it again.
+    """
+    tile = tmp_path / _wc.get_tile_name(12.0, 77.0)
+    tile.write_bytes(b"not read; the reader is faked")
+
+    def must_not_download(*a, **k):
+        raise AssertionError("an installed tile must not be downloaded again")
+
+    seen = {}
+
+    @contextmanager
+    def reader(path):
+        seen["path"] = path
+        yield _FakeDataset(50), _IdentityTransformer()
+
+    monkeypatch.setattr(_wc, "ensure_worldcover_tile", must_not_download)
+    monkeypatch.setattr(_wc, "tile_reader", reader)
+    result = real_fetch()
+    assert result.lookup_state == LookupState.CLASS
+    assert result.class_id == 50
+    assert seen["path"] == tile
+
+
+def test_lookup_clutter_arr_looks_up_each_point_at_its_own_coordinates(monkeypatch):
+    """Swapping lat and lon would put every grid point's lookup somewhere else, silently."""
+    clear_clutter_cache()
+    seen = []
+
+    def fake_fetch(lat, lon, worldcover_dir=None, download_if_missing=True):
+        seen.append((lat, lon))
+        return ClutterLookup(LookupState.TILE_MISSING, None, "Unknown")
+
+    monkeypatch.setattr(_wc, "fetch_worldcover_class", fake_fetch)
+    lats = np.array([[10.0, 11.0], [12.0, 13.0]])
+    lons = np.array([[70.0, 71.0], [72.0, 73.0]])
+    classes, states = lookup_clutter_arr(lats, lons)
+    assert seen == [(10.0, 70.0), (11.0, 71.0), (12.0, 72.0), (13.0, 73.0)]
+    assert classes.shape == states.shape == (2, 2)
+    clear_clutter_cache()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_clutter_config_rejects_non_finite_percentiles(bad):
+    """NaN compares false both ways, so a check written as `p < min or p >= 100`
+    would admit it -- and it would then raise from inside the RF loop."""
+    with pytest.raises(ValueError):
+        ClutterConfig(clutter_percentile=bad)
+
+
+@pytest.mark.parametrize("model", ["legacy_table", "enable", "disable", ""])
+def test_clutter_config_rejects_unknown_models(model):
+    """Never silently disabled: that would switch clutter off for an old project unannounced."""
+    with pytest.raises(ValueError, match="unsupported clutter model"):
+        ClutterConfig(model)
+
+
+@pytest.mark.parametrize("freq_hz", [2e9, 60e9])
+def test_bound_array_evaluator_keeps_its_own_frequency(freq_hz):
+    f_ghz = freq_hz / 1e9
+    bound = make_clutter_arr_evaluator(ClutterConfig(), freq_hz)
+    loss, _ = bound([50, 10], [LookupState.CLASS] * 2, [20.0, 20.0], [True, True])
+    assert loss.tolist() == pytest.approx(
+        [clutter_loss_p2108(f_ghz, 20.0, 50.0), clutter_loss_p833(f_ghz, 20.0, 50.0)], abs=1e-12
+    )
+
+
+def test_table_wrapper_unmapped_class_takes_the_custom_fallback(monkeypatch):
+    """Unchanged from before Phase 1: table.get(class, fallback) for a code the table lacks."""
+    clear_clutter_cache()
+    monkeypatch.setattr(
+        _wc, "fetch_worldcover_class",
+        lambda *a, **k: ClutterLookup(LookupState.CLASS, 999, "Unknown (999)"),
+    )
+    loss, label = clutter_loss_and_class(12.0, 77.0, loss_table={50: 8.0}, fallback_db=3.0)
+    assert loss == 3.0
+    assert label == "Unknown (999)"
+    clear_clutter_cache()
+
+
+def test_p833_at_the_horizon_matches_the_spec_value():
+    """Spec section 4.5 quotes 65.60 dB at 0 deg (20 GHz, p = 50).
+
+    The P.833 vectors above stop at 10 deg, where (theta + E) barely depends on
+    E; at 0 deg it does, so this is what pins P833_E = 0.01.
+    """
+    assert clutter_loss_p833(20.0, 0.0, 50.0) == pytest.approx(65.60, abs=0.01)
