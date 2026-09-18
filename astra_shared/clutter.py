@@ -84,13 +84,25 @@ CLUTTER_BRANCH_TO_CODE: dict[ClutterBranch, int] = {
 
 @dataclass(frozen=True)
 class ClutterConfig:
-    """Spec section 5.4: model and percentile for the new evaluator."""
+    """Spec section 5.4: model and percentile for the new evaluator.
+
+    The percentile is live only for the WorldCover model.  A disabled config
+    carries None, which is the shape the section 8 item 8 normalizer builds
+    (`ClutterConfig("disabled", None)`); whatever percentile a disabled config
+    is given is dropped rather than validated, because it is not used.
+    """
 
     model: ClutterModel = ClutterModel.WORLDCOVER_P2108_P833
-    clutter_percentile: float = DEFAULT_CLUTTER_PERCENTILE
+    clutter_percentile: float | None = DEFAULT_CLUTTER_PERCENTILE
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "model", self.normalized_model())
+        model = self.normalized_model()
+        object.__setattr__(self, "model", model)
+        if model == ClutterModel.DISABLED:
+            object.__setattr__(self, "clutter_percentile", None)
+            return
+        if self.clutter_percentile is None:
+            raise ValueError("the WorldCover clutter model requires a percentile")
         try:
             percentile = float(self.clutter_percentile)
         except (TypeError, ValueError) as exc:
@@ -353,7 +365,13 @@ def evaluate_clutter_loss(lookup, config: ClutterConfig, freq_hz: float, elevati
         return ClutterResult(0.0, class_id, lookup_result.class_label, ClutterBranch.NONE, lookup_state)
 
     raw_elev = float(elevation_deg)
-    if not np.isfinite(raw_elev) or raw_elev > 90.0:
+    # Spec section 4.5: mask on visibility first, then clamp.  This evaluator
+    # has no mask, so its caller must only call it for an admitted link, and
+    # an admitted link has elevation >= min_el_deg >= 0.  An angle below 0 is
+    # therefore a skipped visibility check, not a link: clamping it to the
+    # 5 deg floor would report ~22.6 dB of built-up clutter for a satellite
+    # that is not in view.  Refuse it instead.
+    if not np.isfinite(raw_elev) or not (0.0 <= raw_elev <= 90.0):
         raise ValueError("elevation outside 0-90 degrees")
 
     branch = _branch_for_class(class_id) if lookup_state == LookupState.CLASS else ClutterBranch.NONE
@@ -380,9 +398,9 @@ def evaluate_clutter_arr(class_arr, state_arr, elev_arr, visible_arr, config: Cl
     mask = visible & np.isfinite(elev)
     loss = np.zeros(elev.shape, dtype=np.float64)
 
-    _check_percentile_domain(config.clutter_percentile)
     if config.normalized_model() == ClutterModel.DISABLED:
         return loss, mask
+    _check_percentile_domain(config.clutter_percentile)
 
     f_ghz = float(freq_hz) / 1.0e9
     if not (P2108_F_MIN_GHZ <= f_ghz <= P2108_F_MAX_GHZ):

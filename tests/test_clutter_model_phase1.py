@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
+import math
+from statistics import NormalDist
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from astra_shared.defaults import (
+    CLUTTER_ELEV_FLOOR_DEG,
     CLUTTER_LOSS_DB,
     P2108_F_MAX_GHZ,
     P2108_F_MIN_GHZ,
@@ -48,30 +51,81 @@ from astra_shared.worldcover import (
 )
 
 
+# NTIA/ITS reference vectors for P.2108-1 Annex 1 section 3.3: (f GHz, elevation
+# deg, p %, published L_ces dB).  Source: github.com/NTIA/p2108-test-data at
+# e46db673, AeronauticalStatisticalModelTestData.csv.  NTIA publishes these to
+# one decimal place and tests its own C++ against them at 0.1 dB.
 P2108_REFERENCE_VECTORS = [
-    # Spec section 9 P.2108-1 Annex 1 section 3 reference-vector fixture:
-    # (f GHz, elevation deg, p %, full-precision oracle, NTIA published).
-    # The final column is retained as the NTIA one-decimal cross-check at 0.06 dB.
-    (30.0, 2.0, 5.0, 7.652178444829, 7.7),
-    (30.0, 2.0, 1.0, 1.948907219274, 1.9),
-    (30.0, 2.0, 99.0, 87.277157073233, 87.3),
-    (10.0, 10.5, 45.0, 12.375262758749, 12.4),
-    (15.0, 90.0, 50.0, 0.0, 0.0),
-    (20.0, 0.0, 50.0, 45.647488422852, 45.6),
-    (11.1, 15.5, 80.5, 14.729641323502, 14.7),
+    (30.0, 2.0, 5.0, 7.7),
+    (30.0, 2.0, 1.0, 1.9),
+    (30.0, 2.0, 99.0, 87.3),
+    (10.0, 10.5, 45.0, 12.4),
+    (15.0, 90.0, 50.0, 0.0),
+    (20.0, 0.0, 50.0, 45.6),
+    (11.1, 15.5, 80.5, 14.7),
 ]
 
 
-@pytest.mark.parametrize(
-    ("f_ghz", "elev_deg", "p_pct", "expected_full_precision", "published"),
-    P2108_REFERENCE_VECTORS,
-)
-def test_p2108_reference_vectors(
-    f_ghz, elev_deg, p_pct, expected_full_precision, published
-):
-    actual = clutter_loss_p2108(f_ghz, elev_deg, p_pct)
-    assert actual == pytest.approx(expected_full_precision, abs=1e-6)
-    assert actual == pytest.approx(published, abs=0.06)
+def _ntia_q_inverse_abramowitz_stegun(q):
+    """NTIA's InverseComplementaryCumulativeDistribution, transcribed verbatim.
+
+    github.com/NTIA/p2108 v1.1 (eadb58f),
+    src/InverseComplementaryCumulativeDistribution.cpp: Abramowitz & Stegun
+    26.2.23, |error| < 4.5e-4.
+    """
+    c0, c1, c2 = 2.515517, 0.802853, 0.010328
+    d1, d2, d3 = 1.432788, 0.189269, 0.001308
+    x = 1.0 - q if q > 0.5 else q
+    t = math.sqrt(-2.0 * math.log(x))
+    zeta = ((c2 * t + c1) * t + c0) / (((d3 * t + d2) * t + d1) * t + 1.0)
+    return -(t - zeta) if q > 0.5 else (t - zeta)
+
+
+def _ntia_q_inverse_exact(q):
+    """Q^-1(q) = Phi^-1(1 - q), computed exactly."""
+    return NormalDist().inv_cdf(1.0 - q)
+
+
+def _ntia_aeronautical_model(f_ghz, theta_deg, p, q_inverse):
+    """NTIA's AeronauticalStatisticalModel, transcribed verbatim.
+
+    github.com/NTIA/p2108 v1.1 (eadb58f), src/AeronauticalStatisticalModel.cpp.
+    Written the way NTIA writes it, not the way section 5.1 does: log(1 - p),
+    cot, and a subtracted Q^-1(p) rather than an added Phi^-1(p).  That is the
+    point.  Agreement shows section 5.1's stable rearrangement is the same
+    equation, which comparing Astra with a snapshot of its own output cannot.
+    """
+    k_1 = 93 * f_ghz**0.175
+    part1 = math.log(1 - p / 100.0)
+    part2 = 0.05 * (1 - theta_deg / 90.0) + math.pi * theta_deg / 180.0
+    part3 = 0.5 * (90.0 - theta_deg) / 90.0
+    part4 = 0.6 * q_inverse(p / 100)
+    return (-k_1 * part1 * (1 / math.tan(part2))) ** part3 - 1 - part4
+
+
+@pytest.mark.parametrize(("f_ghz", "elev_deg", "p_pct", "published"), P2108_REFERENCE_VECTORS)
+def test_p2108_matches_ntia_equation_exactly(f_ghz, elev_deg, p_pct, published):
+    """Same equation as NTIA's code, with the inverse normal made exact: 1e-9."""
+    reference = _ntia_aeronautical_model(f_ghz, elev_deg, p_pct, _ntia_q_inverse_exact)
+    assert clutter_loss_p2108(f_ghz, elev_deg, p_pct) == pytest.approx(reference, abs=1e-9)
+
+
+@pytest.mark.parametrize(("f_ghz", "elev_deg", "p_pct", "published"), P2108_REFERENCE_VECTORS)
+def test_p2108_matches_ntia_code_within_its_approximation(f_ghz, elev_deg, p_pct, published):
+    """NTIA's code verbatim, approximation included.
+
+    The two can never agree to 1e-6: NTIA's inverse normal is accurate to
+    4.5e-4, which reaches L_ces through the 0.6 factor as up to 2.7e-4 dB, and
+    the measured gap on these vectors is 2.6e-4 dB.  3e-4 is that bound, not a
+    fitted tolerance.
+    """
+    ntia = _ntia_aeronautical_model(f_ghz, elev_deg, p_pct, _ntia_q_inverse_abramowitz_stegun)
+    assert clutter_loss_p2108(f_ghz, elev_deg, p_pct) == pytest.approx(ntia, abs=3e-4)
+
+
+@pytest.mark.parametrize(("f_ghz", "elev_deg", "p_pct", "published"), P2108_REFERENCE_VECTORS)
+def test_p2108_matches_ntia_published_values(f_ghz, elev_deg, p_pct, published):
+    assert clutter_loss_p2108(f_ghz, elev_deg, p_pct) == pytest.approx(published, abs=0.06)
 
 
 @pytest.mark.parametrize(
@@ -452,7 +506,34 @@ def test_evaluator_does_not_hide_invalid_elevation_sentinels():
         evaluate_clutter_loss(built, cfg, 20e9, 120.0)
     with pytest.raises(ValueError):
         evaluate_clutter_loss(built, cfg, 20e9, -np.inf)
-    assert np.isfinite(evaluate_clutter_loss(built, cfg, 20e9, -30.0).loss_db)
+
+
+@pytest.mark.parametrize("below_horizon", [-999.0, -30.0, -0.5, -1e-9])
+def test_scalar_evaluator_refuses_rather_than_clamps_below_the_horizon(below_horizon):
+    """Spec section 4.5: mask first, then clamp -- never clamp in place of masking.
+
+    The scalar evaluator has no mask, so a negative angle means its caller
+    skipped the visibility check.  Clamping it to the 5 deg floor would report
+    22.56 dB of built-up clutter at 20 GHz for a satellite that is not in view,
+    which is the same number a real 5 deg link gets, so nothing downstream
+    could tell them apart.  An earlier version of these tests asserted that
+    -30 deg returned a finite value: it pinned the defect.
+    """
+    built = ClutterLookup(lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up")
+    with pytest.raises(ValueError, match="elevation outside 0-90 degrees"):
+        evaluate_clutter_loss(built, ClutterConfig(), 20e9, below_horizon)
+
+
+def test_scalar_evaluator_admits_the_whole_visible_range_and_floors_it():
+    """The must-pass half: 0 and 90 are admitted, and 0 takes the 5 deg floor."""
+    built = ClutterLookup(lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up")
+    cfg = ClutterConfig()
+    at_zero = evaluate_clutter_loss(built, cfg, 20e9, 0.0).loss_db
+    assert at_zero == pytest.approx(clutter_loss_p2108(20.0, CLUTTER_ELEV_FLOOR_DEG, 50.0), abs=1e-12)
+    assert at_zero == pytest.approx(22.557, abs=1e-3)
+    assert evaluate_clutter_loss(built, cfg, 20e9, 90.0).loss_db == pytest.approx(
+        clutter_loss_p2108(20.0, 90.0, 50.0), abs=1e-12
+    )
 
 
 def test_scalar_rejects_above_zenith_while_array_clips_grid_points():
@@ -476,15 +557,43 @@ def test_scalar_rejects_above_zenith_while_array_clips_grid_points():
 
 
 def test_array_evaluator_checks_percentile_outside_frequency_window():
+    """The evaluator's own percentile check, not ClutterConfig's.
+
+    ClutterConfig rejects 150 at construction, so building one with 150 would
+    raise before the evaluator ran and this test would pass without reaching
+    the check it is named for.  The config is made valid and then corrupted,
+    so the only thing that can raise is evaluate_clutter_arr.
+    """
+    cfg = ClutterConfig(clutter_percentile=50.0)
+    object.__setattr__(cfg, "clutter_percentile", 150.0)
     with pytest.raises(ValueError, match="1e-300"):
         evaluate_clutter_arr(
             np.array([50], dtype=object),
             np.array([LookupState.CLASS], dtype=object),
             np.array([20.0]),
             np.array([True]),
-            ClutterConfig(clutter_percentile=150.0),
+            cfg,
             120_000_000_000.0,
         )
+
+
+def test_disabled_config_carries_no_percentile():
+    """Spec section 5.4 / section 8 item 8: the normalizer builds ClutterConfig("disabled", None)."""
+    assert ClutterConfig("disabled", None).clutter_percentile is None
+    assert ClutterConfig(ClutterModel.DISABLED).clutter_percentile is None
+    # not live, so not validated and not carried
+    assert ClutterConfig("disabled", 150.0).clutter_percentile is None
+    with pytest.raises(ValueError, match="requires a percentile"):
+        ClutterConfig("worldcover_p2108_p833", None)
+
+    loss, mask = evaluate_clutter_arr(
+        [50, 10], [LookupState.CLASS, LookupState.CLASS], [20.0, -30.0], [True, False],
+        ClutterConfig("disabled", None), 20e9,
+    )
+    assert loss.tolist() == [0.0, 0.0]
+    assert mask.tolist() == [True, False]
+    evaluator = make_clutter_arr_evaluator(ClutterConfig("disabled", None), 20e9)
+    assert evaluator([50], [LookupState.CLASS], [20.0], [True])[0].tolist() == [0.0]
 
 
 def test_clutter_config_validates_percentile_at_construction():
