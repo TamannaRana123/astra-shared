@@ -22,26 +22,16 @@ DEFAULT_BANDWIDTH_HZ: float = DEFAULT_BANDWIDTH_MHZ * 1e6
 ADDITIONAL_LOSSES_DB_MIN: float = 0.0
 ADDITIONAL_LOSSES_DB_MAX: float = 20.0
 POLARIZATION_LOSS_DB_MIN: float = 0.0
-POLARIZATION_LOSS_DB_MAX: float = 10.0
+POLARIZATION_LOSS_DB_MAX: float = 3.0
 CLUTTER_LOSS_DB_MIN: float = 0.0
-CLUTTER_LOSS_DB_MAX: float = 30.0
+CLUTTER_LOSS_DB_MAX: float = 20.0
 BOLTZMANN_DB: float = 228.6
 K_BOLTZMANN_LINEAR: float = 1.380649e-23
-DEFAULT_BANDWIDTH_HZ: float = 10_000_000.0  # 10 MHz in Hz
-DEFAULT_BANDWIDTH_MHZ: float = 10.0
 DEFAULT_MODULATION = "QPSK"
 DEFAULT_CODE_RATE = 1.0
 DEFAULT_COMPUTE_PFD = True
 DEFAULT_PFD_LIMIT_BAND = None
 DEFAULT_PFD_REF_BW_HZ = 1.0e6
-
-# RF loss limits (dB)
-ADDITIONAL_LOSSES_DB_MAX: float = 20.0
-ADDITIONAL_LOSSES_DB_MIN: float = 0.0
-CLUTTER_LOSS_DB_MAX: float = 20.0
-CLUTTER_LOSS_DB_MIN: float = 0.0
-POLARIZATION_LOSS_DB_MAX: float = 3.0
-POLARIZATION_LOSS_DB_MIN: float = 0.0
 
 # =============================================================================
 # ITU-R P.618 Atmospheric Model Defaults
@@ -63,6 +53,20 @@ ATMOSPHERIC_IMPACT_NOTES: dict[str, str] = {
 # WorldCover Clutter Configuration
 # =============================================================================
 
+# Model-based clutter constants. P_MIN_PCT is the helper lower bound; the
+# CLUTTER_PERCENTILE_INPUT_* values are for the later config normalizer.
+P_MIN_PCT: float = 1.0e-300
+CLUTTER_PERCENTILE_INPUT_MIN: float = 0.001
+CLUTTER_PERCENTILE_INPUT_MAX: float = 99.999
+DEFAULT_CLUTTER_PERCENTILE: float = 50.0
+P2108_F_MIN_GHZ: float = 0.5
+P2108_F_VALID_GHZ: float = 10.0
+P2108_F_MAX_GHZ: float = 100.0
+CLUTTER_ELEV_FLOOR_DEG: float = 5.0
+P833_A: float = 1.87
+P833_E: float = 0.01
+P833_G: float = -0.12
+
 # Tile directory — override via WORLDCOVER_DIR env var in container deployments
 WORLDCOVER_DIR: Path = Path(
     os.environ.get(
@@ -75,7 +79,6 @@ WORLDCOVER_S3_BASE: str = (
     "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map"
 )
 
-# Clutter loss per WorldCover land cover class (dB)
 CLUTTER_LOSS_DB: dict[int, float] = {
     10: 3.0,  # Tree cover
     20: 2.0,  # Shrubland
@@ -89,8 +92,6 @@ CLUTTER_LOSS_DB: dict[int, float] = {
     95: 0.0,  # Mangroves
     100: 0.0,  # Moss & lichen
 }
-
-# Fallback clutter loss when land cover class is unknown or tile unavailable
 CLUTTER_FALLBACK_DB: float = 0.0
 
 # Human-readable labels for WorldCover land cover classes
@@ -108,8 +109,8 @@ CLUTTER_CLASS_LABELS: dict[int, str] = {
     100: "Moss & lichen",
 }
 
-# Valid WorldCover class IDs — derived from CLUTTER_LOSS_DB, used for input validation
-VALID_CLUTTER_CLASS_IDS: frozenset[int] = frozenset(CLUTTER_LOSS_DB.keys())
+# Valid WorldCover class IDs for the model-routing layer.
+VALID_CLUTTER_CLASS_IDS: frozenset[int] = frozenset(CLUTTER_CLASS_LABELS.keys())
 
 # =============================================================================
 # Flask Server Configuration

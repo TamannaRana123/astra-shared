@@ -2,10 +2,7 @@
 """
 worldcover.py
 
-ESA WorldCover clutter data management.
-
-Functions for downloading, caching, and querying ESA WorldCover 10m land cover tiles
-to compute clutter loss for satellite link budget calculations.
+WorldCover lookup and cache helpers for spec sections 5.5 and 8 item 3.
 """
 
 from __future__ import annotations
@@ -21,10 +18,18 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 
+import numpy as np
 import requests
 from pathlib import Path
 from typing import Callable
 
+from .clutter import (
+    CACHEABLE_LOOKUP_STATES,
+    CLUTTER_CLASS_NONE,
+    ClutterLookup,
+    LookupState,
+    LOOKUP_STATE_TO_CODE,
+)
 from .defaults import (
     CLUTTER_CLASS_LABELS,
     CLUTTER_FALLBACK_DB,
@@ -62,8 +67,8 @@ _CACHE_EVICT_INTERVAL: float = float(
     os.environ.get("CLUTTER_CACHE_EVICT_INTERVAL", "60")
 )
 
-# OrderedDict gives O(1) LRU via move_to_end / popitem(last=False)
-_CLUTTER_CACHE: collections.OrderedDict[tuple[int, int], tuple[float, str]] = (
+
+_CLUTTER_CACHE: collections.OrderedDict[tuple[int, int], ClutterLookup] = (
     collections.OrderedDict()
 )
 _CLUTTER_CACHE_LOCK = threading.Lock()
@@ -363,6 +368,79 @@ def get_tile_name(lat: float, lon: float) -> str:
     )
 
 
+def _coerce_lookup(lookup) -> ClutterLookup:
+    if isinstance(lookup, ClutterLookup):
+        return lookup
+    if isinstance(lookup, tuple) and len(lookup) == 3:
+        state, class_id, label = lookup
+        return ClutterLookup(
+            lookup_state=state if isinstance(state, LookupState) else LookupState(str(state)),
+            class_id=class_id,
+            class_label=str(label),
+        )
+    raise TypeError("lookup must be ClutterLookup or a 3-tuple")
+
+
+def _clutter_cache_key(lat: float, lon: float) -> tuple[int, int]:
+    # Existing granularity is ~111 m at the equator; acceptable for current
+    # grid steps, but coarser than the 10 m raster and tracked for re-keying.
+    return int(round(lat * 1000)), int(round(lon * 1000))
+
+
+def lookup_worldcover_class(
+    lat: float,
+    lon: float,
+    worldcover_dir: Path | None = None,
+    download_if_missing: bool = True,
+) -> ClutterLookup:
+    """Spec section 5.5 metadata-cache lookup."""
+    key = _clutter_cache_key(lat, lon)
+    with _CLUTTER_CACHE_LOCK:
+        if key in _CLUTTER_CACHE:
+            _CLUTTER_CACHE.move_to_end(key)
+            return _CLUTTER_CACHE[key]
+
+    lookup = _coerce_lookup(
+        fetch_worldcover_class(
+            lat,
+            lon,
+            worldcover_dir=worldcover_dir,
+            download_if_missing=download_if_missing,
+        )
+    )
+    if lookup.lookup_state in CACHEABLE_LOOKUP_STATES:
+        with _CLUTTER_CACHE_LOCK:
+            _CLUTTER_CACHE[key] = lookup
+            _CLUTTER_CACHE.move_to_end(key)
+    return lookup
+
+
+def lookup_clutter_arr(
+    lat_arr,
+    lon_arr,
+    worldcover_dir: Path | None = None,
+    download_if_missing: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Spec section 8 item 3 class/state array lookup."""
+    lats, lons = np.broadcast_arrays(
+        np.asarray(lat_arr, dtype=np.float64),
+        np.asarray(lon_arr, dtype=np.float64),
+    )
+    class_out = np.full(lats.shape, CLUTTER_CLASS_NONE, dtype=np.int16)
+    state_out = np.empty(lats.shape, dtype=np.int16)
+    for idx in np.ndindex(lats.shape):
+        lookup_result = lookup_worldcover_class(
+            float(lats[idx]),
+            float(lons[idx]),
+            worldcover_dir=worldcover_dir,
+            download_if_missing=download_if_missing,
+        )
+        if lookup_result.class_id is not None:
+            class_out[idx] = lookup_result.class_id
+        state_out[idx] = LOOKUP_STATE_TO_CODE[lookup_result.lookup_state]
+    return class_out, state_out
+
+
 def ensure_worldcover_tile(
     lat: float,
     lon: float,
@@ -488,12 +566,9 @@ def fetch_worldcover_class(
     lon: float,
     worldcover_dir: Path | None = None,
     download_if_missing: bool = True,
-) -> int | None:
+) -> ClutterLookup:
     """
-    Fetch ESA WorldCover land cover class from local tile.
-
-    Uses cached tile datasets and transformers for 10-minute TTL to avoid
-    repeated file I/O during grid computations.
+    Spec section 5.5 WorldCover tile lookup states.
 
     Args:
         lat: Latitude in degrees
@@ -502,10 +577,17 @@ def fetch_worldcover_class(
         download_if_missing: If True, download tile if not present
 
     Returns:
-        Land cover class ID (10-100) or None if unavailable
+        WorldCover class lookup with state and label.
+
+    Download and raster-read exceptions are reported as READ_FAILED because
+    both are retryable lookup failures and must not populate the metadata cache.
     """
     if not HAS_RASTERIO:
-        return None
+        return ClutterLookup(
+            lookup_state=LookupState.RASTERIO_UNAVAILABLE,
+            class_id=None,
+            class_label="Unknown",
+        )
 
     if worldcover_dir is None:
         worldcover_dir = WORLDCOVER_DIR
@@ -515,7 +597,11 @@ def fetch_worldcover_class(
 
     if not _is_tile_known_local(tile_name):
         if _is_tile_not_on_s3(tile_name):
-            return None
+            return ClutterLookup(
+                lookup_state=LookupState.TILE_NOT_PUBLISHED,
+                class_id=None,
+                class_label="Unknown",
+            )
         if tile_path.exists():
             _mark_tile_known_local(tile_name)
         elif download_if_missing:
@@ -528,13 +614,25 @@ def fetch_worldcover_class(
                     lon,
                     exc,
                 )
-                return None
+                return ClutterLookup(
+                    lookup_state=LookupState.READ_FAILED,
+                    class_id=None,
+                    class_label="Unknown",
+                )
             if result is None:
-                return None
+                return ClutterLookup(
+                    lookup_state=LookupState.TILE_NOT_PUBLISHED,
+                    class_id=None,
+                    class_label="Unknown",
+                )
             tile_path = result
             _mark_tile_known_local(tile_name)
         else:
-            return None
+            return ClutterLookup(
+                lookup_state=LookupState.TILE_MISSING,
+                class_id=None,
+                class_label="Unknown",
+            )
 
     try:
         # Use context manager for thread-safe tile access with reference counting
@@ -544,9 +642,23 @@ def fetch_worldcover_class(
             window = Window(col, row, 1, 1)
             data = ds.read(1, window=window)
             val = int(data[0, 0])
-            return None if val == 0 else val
+            if val == 0:
+                return ClutterLookup(
+                    lookup_state=LookupState.NO_DATA_PIXEL,
+                    class_id=None,
+                    class_label="Unknown",
+                )
+            return ClutterLookup(
+                lookup_state=LookupState.CLASS,
+                class_id=val,
+                class_label=CLUTTER_CLASS_LABELS.get(val, f"Unknown ({val})"),
+            )
     except Exception:
-        return None
+        return ClutterLookup(
+            lookup_state=LookupState.READ_FAILED,
+            class_id=None,
+            class_label="Unknown",
+        )
 
 
 def clutter_loss_and_class(
@@ -557,58 +669,24 @@ def clutter_loss_and_class(
     loss_table: dict[int, float] | None = None,
     fallback_db: float | None = None,
 ) -> tuple[float, str]:
+    """Compatibility wrapper for existing table-based callers.
+
+    The coordinate cache stores WorldCover lookup metadata only and uses the
+    same lat/lon key for all directories; callers that switch `worldcover_dir`
+    for the same rounded coordinate may reuse the first cached class.
     """
-    Get clutter loss in dB for a location using WorldCover data.
+    del point_num
 
-    Uses caching to avoid repeated lookups for nearby coordinates.
-    Tile datasets are cached for 10 minutes to avoid repeated file I/O.
-
-    Args:
-        lat: Latitude in degrees
-        lon: Longitude in degrees
-        point_num: Point number for progress reporting (logs every 50 points)
-        worldcover_dir: Directory containing WorldCover tiles (defaults to WORLDCOVER_DIR)
-        loss_table: Custom clutter loss values per class ID (None = use defaults)
-        fallback_db: Custom fallback loss for unknown classes (None = use default)
-
-    Returns:
-        Tuple of clutter loss in dB and the WorldCover class label.
-    """
-    use_default_table = loss_table is None and fallback_db is None
     table = loss_table if loss_table is not None else CLUTTER_LOSS_DB
     fb = fallback_db if fallback_db is not None else CLUTTER_FALLBACK_DB
-
-    # Cache key: 3 decimal places ≈ 111 m granularity. Points within 111 m
-    # share an entry; this is intentional for coverage grids (step_km >= 5).
-    # Use 10000 (≈ 11 m) here only when sub-100 m accuracy is required.
-    key = (int(round(lat * 1000)), int(round(lon * 1000)))
-
-    # Only use the cache when the default table is active. Custom loss_table
-    # values differ per-run and must not bleed into runs using different tables.
-    if use_default_table:
-        with _CLUTTER_CACHE_LOCK:
-            if key in _CLUTTER_CACHE:
-                _CLUTTER_CACHE.move_to_end(key)
-                return _CLUTTER_CACHE[key]
 
     if worldcover_dir is None:
         worldcover_dir = WORLDCOVER_DIR
 
-    cl = fetch_worldcover_class(lat, lon, worldcover_dir)
-    if cl is None:
-        # Tile unavailable (download failed, ocean, bbox-skipped) — return fallback
-        # but do NOT cache it so a later successful download gives the real value.
+    lookup = lookup_worldcover_class(lat, lon, worldcover_dir=worldcover_dir)
+    if lookup.lookup_state != LookupState.CLASS:
         return float(fb), "Unknown"
-
-    val = table.get(cl, fb)
-    label = CLUTTER_CLASS_LABELS.get(cl, f"Unknown ({cl})")
-
-    if use_default_table:
-        with _CLUTTER_CACHE_LOCK:
-            _CLUTTER_CACHE[key] = (float(val), label)
-            _CLUTTER_CACHE.move_to_end(key)
-
-    return float(val), label
+    return float(table.get(lookup.class_id, fb)), lookup.class_label
 
 
 def clutter_loss_db(
@@ -619,7 +697,7 @@ def clutter_loss_db(
     loss_table: dict[int, float] | None = None,
     fallback_db: float | None = None,
 ) -> float:
-    """Get clutter loss in dB for a location using WorldCover data."""
+    """Compatibility wrapper for existing table-based callers."""
     loss_db, _ = clutter_loss_and_class(
         lat,
         lon,

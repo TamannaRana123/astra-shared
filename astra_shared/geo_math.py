@@ -2,7 +2,7 @@
 geo_math.py
 
 Pure-math geodetic coordinate utilities shared across Astra services.
-No external dependencies — stdlib math only.
+Uses stdlib math for scalar helpers and numpy for vector helpers.
 
 Functions:
 - ecef_to_geodetic()   - ECEF (metres) → WGS84 lat/lon/alt
@@ -17,6 +17,8 @@ astra-constellation-engine, not here.
 from __future__ import annotations
 
 import math
+
+import numpy as np
 
 # WGS84 constants
 _A = 6378137.0          # semi-major axis, metres
@@ -131,6 +133,40 @@ def compute_elevation(
         return math.degrees(math.asin((Rs * math.cos(d_sigma) - R_obs) / slant_km))
     except Exception:
         return 0.0
+
+
+def compute_elevation_vec(
+    obs_lat,
+    obs_lon,
+    sat_lat,
+    sat_lon,
+    sat_alt_km,
+    obs_alt_km=0.0,
+) -> np.ndarray:
+    """Vectorized spherical-Earth elevation angle in degrees."""
+    r_earth_km = 6371.0
+    obs_alt_arr = np.asarray(obs_alt_km, dtype=np.float64)
+    sat_alt_arr = np.asarray(sat_alt_km, dtype=np.float64)
+    r_obs = r_earth_km + obs_alt_arr
+    r_sat = r_earth_km + sat_alt_arr
+
+    obs_lat_rad = np.radians(obs_lat)
+    obs_lon_rad = np.radians(obs_lon)
+    sat_lat_rad = np.radians(sat_lat)
+    sat_lon_rad = np.radians(sat_lon)
+    dlon = sat_lon_rad - obs_lon_rad
+
+    cos_d_sigma = (
+        np.sin(obs_lat_rad) * np.sin(sat_lat_rad)
+        + np.cos(obs_lat_rad) * np.cos(sat_lat_rad) * np.cos(dlon)
+    )
+    d_sigma = np.arccos(np.clip(cos_d_sigma, -1.0, 1.0))
+    slant_km = np.sqrt(
+        r_sat**2 + r_obs**2 - 2.0 * r_sat * r_obs * np.cos(d_sigma)
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sin_el = (r_sat * np.cos(d_sigma) - r_obs) / slant_km
+    return np.degrees(np.arcsin(np.clip(sin_el, -1.0, 1.0)))
 
 
 def teme_to_ecef(x: float, y: float, z: float, jd: float) -> tuple[float, float, float]:

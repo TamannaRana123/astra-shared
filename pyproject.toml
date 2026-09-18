@@ -7,6 +7,11 @@ name = "astra-shared"
 version = "0.1.0"
 description = "NetSim Astra shared utilities — RF defaults, parameter parsing, geodetic math"
 requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "requests",
+    "sgp4",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
