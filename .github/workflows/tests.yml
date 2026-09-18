@@ -1,0 +1,35 @@
+name: Tests
+
+# astra-shared had no test run in CI: astra-radio-engine and astra-ui-app
+# install it from main, but nothing ran its own tests. This runs them on every
+# push and on pull requests to main and develop, matching those repos.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Only the package's declared requirements. rasterio is deliberately
+      # absent: the WorldCover lookup tests replace the raster reader, so they
+      # must pass without it, and this is where that is checked.
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -v
