@@ -94,6 +94,38 @@ def _get_float(
     return value
 
 
+def _get_float_pair(
+    params: dict,
+    key: str,
+    default: float,
+    min_val: float | None = None,
+    max_val: float | None = None,
+) -> tuple[float, float]:
+    """Parse a finite float once and return its requested and clamped values.
+
+    The requested value is the finite value supplied by the user (or the
+    default when the input is absent or invalid).  Keeping it alongside the
+    clamped value lets callers report an adjustment without parsing the input
+    a second time.
+    """
+    raw_value = params.get(key, default)
+    if raw_value in (None, ""):
+        raw_value = default
+    try:
+        requested = float(raw_value)
+    except (TypeError, ValueError):
+        requested = float(default)
+    if not math.isfinite(requested):
+        requested = float(default)
+
+    value = requested
+    if min_val is not None:
+        value = max(min_val, value)
+    if max_val is not None:
+        value = min(max_val, value)
+    return requested, value
+
+
 def _get_int(
     params: dict,
     key: str,
