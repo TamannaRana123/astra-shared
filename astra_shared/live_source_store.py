@@ -463,13 +463,10 @@ def commit_point_run_cas(
                 or current["lifecycle_state"] != "active"
             ):
                 return "already_committed" if keys and set(keys).issubset(existing) else "conflict"
-            now_iso = isoformat_z(utc_now())
-            for row in rows:
-                conn.execute(
-                    "INSERT INTO live_point_projections "
-                    "(run_id, projection_key, projection_json, created_at) VALUES (?, ?, ?, ?)",
-                    (run_id, str(row["key"]), json.dumps(row, separators=(",", ":")), now_iso),
-                )
+            # Do the conditional UPDATE FIRST. If another writer won the version race
+            # between the SELECT above and here, rowcount is 0 and we return before
+            # inserting any projection rows — otherwise the rows would be committed by
+            # the connection context manager even on a conflict (phantom durable rows).
             cursor = conn.execute(
                 "UPDATE live_runs SET run_json = ?, state_version = state_version + 1 "
                 "WHERE run_id = ? AND state_version = ? AND lifecycle_generation = ? "
@@ -481,7 +478,16 @@ def commit_point_run_cas(
                     int(expected_generation),
                 ),
             )
-            return "committed" if cursor.rowcount == 1 else "conflict"
+            if cursor.rowcount != 1:
+                return "already_committed" if keys and set(keys).issubset(existing) else "conflict"
+            now_iso = isoformat_z(utc_now())
+            for row in rows:
+                conn.execute(
+                    "INSERT INTO live_point_projections "
+                    "(run_id, projection_key, projection_json, created_at) VALUES (?, ?, ?, ?)",
+                    (run_id, str(row["key"]), json.dumps(row, separators=(",", ":")), now_iso),
+                )
+            return "committed"
 
     return str(_with_retry(_op))
 

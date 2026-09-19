@@ -486,8 +486,11 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
             if not isinstance(row, dict):
                 errors.append("target_not_object")
                 continue
-            target_id_supplied = "target_id" in row
-            target_id = str(row.get("target_id", "")).strip()
+            raw_target_id = row.get("target_id")
+            # Treat an explicit JSON null as "not supplied" (auto-generate), not as
+            # the literal string "None"; an explicit empty string is still a blank error.
+            target_id_supplied = "target_id" in row and raw_target_id is not None
+            target_id = str(raw_target_id).strip() if raw_target_id is not None else ""
             if target_id_supplied and not target_id:
                 errors.append("target_id_blank")
                 continue
@@ -504,10 +507,18 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
             label = str(row.get("label") or f"Target-{index + 1}").strip() or f"Target-{index + 1}"
             try:
                 lat = float(row.get("target_lat"))
-                lon = float(row.get("target_lon"))
-                alt = float(row.get("target_alt_km", 0.0) or 0.0)
             except (TypeError, ValueError):
                 errors.append("target_lat_invalid")
+                continue
+            try:
+                lon = float(row.get("target_lon"))
+            except (TypeError, ValueError):
+                errors.append("target_lon_invalid")
+                continue
+            try:
+                alt = float(row.get("target_alt_km", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                errors.append("target_altitude_unsupported")
                 continue
             if not math.isfinite(lat) or not -90.0 <= lat <= 90.0:
                 errors.append("target_lat_out_of_range" if math.isfinite(lat) else "target_lat_invalid")

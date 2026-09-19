@@ -7,12 +7,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 GEO_ALTITUDE_KM = 35786.0
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# C0 + DEL + C1 control ranges plus the Unicode line/paragraph separators.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 
 
 def _stable_text(value: Any, *, field: str) -> str:
-    if value is None or isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        raise ValueError(f"{field} must be a scalar string")
+    # Accept only str and non-boolean int. Reject float: a float-typed id
+    # (e.g. a NORAD id arriving as 44714.0) would stringify to "44714.0" and
+    # silently fragment identity against an int-built "44714".
+    if value is None or isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"{field} must be a scalar string or integer id")
     text = str(value).strip()
     if not text or len(text) > 128 or _CONTROL_RE.search(text):
         raise ValueError(f"{field} must be nonblank and free of control characters")

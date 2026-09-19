@@ -35,6 +35,7 @@ _VALIDATION_MESSAGES = {
     "target_lon_invalid": ("target_lon", "Target longitude is invalid."),
     "target_lon_out_of_range": ("target_lon", "Target longitude must be from -180 to 180 degrees."),
     "target_altitude_unsupported": ("target_alt_km", "Target altitude must be 0 km in Phase 1."),
+    "conflicting_targets_sources": ("targets", "Targets JSON and targets list disagree."),
     "targets_required": ("targets", "Earth-fixed pointing requires at least one target."),
     "earth_fixed_targets_required": ("targets", "Earth-fixed pointing requires at least one target."),
     "earth_fixed_analysis_mode_unsupported": ("analysis_mode", "Earth-fixed pointing is not supported for this analysis mode."),
