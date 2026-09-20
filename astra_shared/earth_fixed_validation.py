@@ -46,6 +46,7 @@ _VALIDATION_MESSAGES = {
     "coverage_top_level_pointing_alias": ("rf", "Coverage earth-fixed pointing fields must be nested under rf."),
     "coverage_result_id_invalid": ("coverage_result_id", "Coverage result ID is invalid."),
     "configured_satellite_manifest_invalid": ("configured_satellite_manifest", "Configured satellite manifest is invalid."),
+    "client_sat_id_invalid": ("client_sat_id", "Client satellite identity is invalid."),
     "scalar_ground_lat_missing": ("ground_lat", "Scalar point ground latitude is required."),
     "scalar_ground_lon_missing": ("ground_lon", "Scalar point ground longitude is required."),
     "scalar_ground_lat_invalid": ("ground_lat", "Scalar point ground latitude is invalid."),
@@ -156,9 +157,18 @@ def validate_earth_fixed_request(
             candidate_loss_probe_status=candidate_loss_probe_status,
             probe_dynamic_adapters=probe_dynamic_adapters,
         )
-        for source in availability.values():
+        for key, source in availability.items():
             if not source["available"]:
-                if candidate_loss_probe_status in {"empty_satellites", "visible_no_reachable_target"} and entry_point == "coverage":
+                # A no-work snapshot (no satellites / no reachable target) means a
+                # dynamic loss source simply had nothing to probe — skip only those
+                # probe-dependent sources (clutter). Atmosphere is STATICALLY
+                # unsupported for highest C/N and must be rejected regardless of
+                # work availability, so never suppress it here.
+                if (
+                    key != "atmospheric_loss"
+                    and candidate_loss_probe_status in {"empty_satellites", "visible_no_reachable_target"}
+                    and entry_point in {"coverage", "live_point_bulk"}
+                ):
                     continue
                 if not probe_dynamic_adapters and source.get("dynamic_probe_required"):
                     continue
