@@ -167,7 +167,7 @@ def validate_earth_fixed_request(
                 if (
                     key != "atmospheric_loss"
                     and candidate_loss_probe_status in {"empty_satellites", "visible_no_reachable_target"}
-                    and entry_point in {"coverage", "live_point_bulk"}
+                    and entry_point in {"coverage", "live_point_bulk", "rf_log"}
                 ):
                     continue
                 if not probe_dynamic_adapters and source.get("dynamic_probe_required"):
