@@ -51,6 +51,71 @@ def canonical_coverage_sat_id(
     return f"runtime-snapshot-{order_index}"
 
 
+def _num(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def build_earth_fixed_rf_identity_v1(params: dict) -> dict:
+    """Return the single canonical `earth_fixed_rf_identity_v1` object shared by
+    the live pointing_config_hash, the RF-log offline_config_key, and the
+    Coverage coverage_config_hash, so those three identities cannot drift.
+
+    `params` is a parsed RF dict (e.g. parse_rf_params output). Aliases are
+    accepted for the two historically-divergent keys (frequency_hz/freq_hz and
+    clutter_enable/clutter_enabled) and normalized to the canonical spelling.
+    """
+    p = params or {}
+    frequency_hz = p.get("frequency_hz")
+    if frequency_hz is None:
+        frequency_hz = p.get("freq_hz")
+    clutter_enable = p.get("clutter_enable")
+    if clutter_enable is None:
+        clutter_enable = p.get("clutter_enabled")
+    return {
+        "schema": "earth_fixed_rf_identity_v1",
+        "pointing_mode": p.get("pointing_mode", "nadir"),
+        "assignment_rule": p.get("assignment_rule", "highest_elevation"),
+        "max_steer_deg": _num(p.get("max_steer_deg")),
+        "min_elevation_deg": _num(p.get("min_elevation_deg", p.get("min_el_deg"))),
+        "antenna_model": p.get("antenna_model"),
+        "beamwidth_deg": _num(p.get("beamwidth_deg")),
+        "max_gain_dbi": _num(p.get("max_gain_dbi")),
+        "ln_db": _num(p.get("ln_db")),
+        "ellipticity_ratio": _num(p.get("ellipticity_ratio")),
+        "aperture_radius_wl": _num(p.get("aperture_radius_wl")),
+        "num_elements_x": p.get("num_elements_x"),
+        "num_elements_y": p.get("num_elements_y"),
+        "spacing_wl": _num(p.get("spacing_wl")),
+        "element_exponent": _num(p.get("element_exponent")),
+        "custom_antenna": p.get("custom_antenna"),
+        "clutter_enable": bool(clutter_enable),
+        "clutter_values": p.get("clutter_values"),
+        "clutter_fallback": p.get("clutter_fallback"),
+        "atmospheric_mode": p.get("atmospheric_mode", "disable"),
+        "availability_percent": _num(p.get("availability_percent")),
+        "additional_losses_db": _num(p.get("additional_losses_db")),
+        "polarization_loss_db": _num(p.get("polarization_loss_db")),
+        "frequency_hz": _num(frequency_hz),
+        "rx_gain_dbi": _num(p.get("rx_gain_dbi")),
+        "eirp_dbw": _num(p.get("eirp_dbw")),
+        "system_noise_temp_k": _num(p.get("system_noise_temp_k")),
+        "bandwidth_hz": _num(p.get("bandwidth_hz")),
+        "modulation": p.get("modulation"),
+        "data_rate_bps": _num(p.get("data_rate_bps")),
+        "code_rate": _num(p.get("code_rate")),
+        "compute_pfd": bool(p.get("compute_pfd", True)),
+        "pfd_limit_band": p.get("pfd_limit_band"),
+        "pfd_ref_bw_hz": _num(p.get("pfd_ref_bw_hz")),
+        "pfd_l0_dbw_m2": _num(p.get("pfd_l0_dbw_m2")),
+        "pfd_l25_dbw_m2": _num(p.get("pfd_l25_dbw_m2")),
+    }
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
