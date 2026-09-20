@@ -116,6 +116,21 @@ def build_earth_fixed_rf_identity_v1(params: dict) -> dict:
     }
 
 
+def build_earth_fixed_offline_config_key_v1(ground_lat: Any, ground_lon: Any, rf_params: dict, targets: Any = None) -> str:
+    """RF-log offline configuration key: the versioned identity for an offline
+    Point (RF-log) request, built from the normalized ground point, the SAME
+    shared earth_fixed_rf_identity_v1, and canonical ordered targets — so the
+    three config identities (live pointing_config_hash, coverage_config_hash,
+    RF-log offline_config_key) all derive from one builder and cannot drift."""
+    payload = {
+        "schema": "earth_fixed_offline_config_key_v1",
+        "point": {"lat": _num(ground_lat), "lon": _num(ground_lon)},
+        "rf": build_earth_fixed_rf_identity_v1(rf_params),
+        "targets": list(targets or []),
+    }
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
