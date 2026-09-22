@@ -4,6 +4,7 @@ import json
 import logging
 import math
 
+from .custom_antenna_schema import normalize_custom_antenna
 from .defaults import (
     ADDITIONAL_LOSSES_DB_MAX,
     ADDITIONAL_LOSSES_DB_MIN,
@@ -22,7 +23,6 @@ from .defaults import (
     POLARIZATION_LOSS_DB_MIN,
     VALID_CLUTTER_CLASS_IDS,
 )
-from .custom_antenna_schema import normalize_custom_antenna
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +62,22 @@ PFD_LIMIT_PRESETS = {
     "Ka-17700-19300-GSO-or-old-NGSO": {"l0": -115.0, "l25": -105.0, "ref_bw_hz": 1.0e6},
     "Ka-19300-19700-FSS": {"l0": -115.0, "l25": -105.0, "ref_bw_hz": 1.0e6},
     "Ka-27500-27501-FSS": {"l0": -115.0, "l25": -105.0, "ref_bw_hz": 1.0e6},
-    "Q-37500-40000-NGSO": {"l0": -120.0, "l25": -105.0, "ref_bw_hz": 1.0e6, "slope": 0.75},
+    "Q-37500-40000-NGSO": {
+        "l0": -120.0,
+        "l25": -105.0,
+        "ref_bw_hz": 1.0e6,
+        "slope": 0.75,
+    },
     "Q-37500-40000-GSO": {"ref_bw_hz": 1.0e6, "shape": "q_gso_127"},
     "Q-40000-40500-FSS": {"l0": -115.0, "l25": -105.0, "ref_bw_hz": 1.0e6},
     "Q-40500-42000-NGSO": {"l0": -115.0, "l25": -105.0, "ref_bw_hz": 1.0e6},
     "Q-40500-42000-GSO": {"ref_bw_hz": 1.0e6, "shape": "q_gso_120"},
-    "Q-42000-42500-NGSO": {"l0": -120.0, "l25": -105.0, "ref_bw_hz": 1.0e6, "slope": 0.75},
+    "Q-42000-42500-NGSO": {
+        "l0": -120.0,
+        "l25": -105.0,
+        "ref_bw_hz": 1.0e6,
+        "slope": 0.75,
+    },
     "Q-42000-42500-GSO": {"ref_bw_hz": 1.0e6, "shape": "q_gso_127"},
 }
 
@@ -244,7 +254,10 @@ def _parse_code_rate(params: dict) -> float:
     if raw in (None, "", "null"):
         return DEFAULT_CODE_RATE
     value = float(raw)
-    if not any(math.isclose(value, allowed, rel_tol=0.0, abs_tol=1.0e-9) for allowed in VALID_CODE_RATES):
+    if not any(
+        math.isclose(value, allowed, rel_tol=0.0, abs_tol=1.0e-9)
+        for allowed in VALID_CODE_RATES
+    ):
         raise ValueError(f"code_rate must be one of: {VALID_CODE_RATE_LABELS}")
     return value
 
@@ -326,12 +339,8 @@ def _parse_pfd_params(
             raise ValueError(
                 "custom PFD limit requires pfd_l0_dbw_m2 and pfd_l25_dbw_m2"
             )
-        pfd_l0_dbw_m2 = _validate_custom_pfd_limit(
-            pfd_l0_dbw_m2, "pfd_l0_dbw_m2"
-        )
-        pfd_l25_dbw_m2 = _validate_custom_pfd_limit(
-            pfd_l25_dbw_m2, "pfd_l25_dbw_m2"
-        )
+        pfd_l0_dbw_m2 = _validate_custom_pfd_limit(pfd_l0_dbw_m2, "pfd_l0_dbw_m2")
+        pfd_l25_dbw_m2 = _validate_custom_pfd_limit(pfd_l25_dbw_m2, "pfd_l25_dbw_m2")
         return compute_pfd, pfd_limit_band, pfd_l0_dbw_m2, pfd_l25_dbw_m2, pfd_ref_bw_hz
 
     return compute_pfd, None, None, None, pfd_ref_bw_hz
@@ -348,9 +357,15 @@ def parse_rf_params(params: dict) -> dict:
     Accepts form args, config.json, project files, or HTTP request bodies.
     Callers use the subset they need � unused keys are harmless.
     """
-    if params.get("frequency_ghz") not in (None, "") or params.get("frequency") not in (None, ""):
+    if params.get("frequency_ghz") not in (None, "") or params.get("frequency") not in (
+        None,
+        "",
+    ):
         freq_ghz = _get_float(
-            params, "frequency_ghz", _get_float(params, "frequency", 12.0), min_val=0.001
+            params,
+            "frequency_ghz",
+            _get_float(params, "frequency", 12.0),
+            min_val=0.001,
         )
         freq_hz = freq_ghz * 1e9
     else:
@@ -364,7 +379,9 @@ def parse_rf_params(params: dict) -> dict:
         aperture_radius_wl = _get_float(params, "aperture_radius_wl", 10.0, min_val=1.0)
         aperture_radius_m = aperture_radius_wl * wavelength_m
     else:
-        aperture_radius_m = _get_float(params, "aperture_radius_m", 10.0 * wavelength_m, min_val=0.0)
+        aperture_radius_m = _get_float(
+            params, "aperture_radius_m", 10.0 * wavelength_m, min_val=0.0
+        )
         aperture_radius_wl = aperture_radius_m / wavelength_m
     system_noise_temp_k = _get_float(
         params,

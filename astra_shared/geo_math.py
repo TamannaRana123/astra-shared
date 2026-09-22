@@ -51,7 +51,9 @@ def ecef_to_geodetic(x: float, y: float, z: float) -> tuple[float, float, float]
     return math.degrees(lat), math.degrees(lon), alt
 
 
-def geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> tuple[float, float, float]:
+def geodetic_to_ecef(
+    lat_deg: float, lon_deg: float, alt_m: float
+) -> tuple[float, float, float]:
     """
     Convert WGS84 geodetic coordinates to ECEF.
 
@@ -74,7 +76,9 @@ def geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> tuple[floa
     return x, y, z
 
 
-def distance_3d(x1: float, y1: float, z1: float, x2: float, y2: float, z2: float) -> float:
+def distance_3d(
+    x1: float, y1: float, z1: float, x2: float, y2: float, z2: float
+) -> float:
     """
     Euclidean distance between two ECEF points.
 
@@ -88,7 +92,9 @@ def distance_3d(x1: float, y1: float, z1: float, x2: float, y2: float, z2: float
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
 
 
-def haversine_km(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2_deg: float) -> float:
+def haversine_km(
+    lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2_deg: float
+) -> float:
     """
     Great-circle distance between two geodetic points (Haversine formula).
 
@@ -104,13 +110,20 @@ def haversine_km(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2_deg: fl
     lat2 = math.radians(lat2_deg)
     dlat = math.radians(lat2_deg - lat1_deg)
     dlon = math.radians(lon2_deg - lon1_deg)
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
     return R * 2 * math.asin(math.sqrt(a))
 
 
 def compute_elevation(
-    obs_lat: float, obs_lon: float, sat_lat: float, sat_lon: float,
-    sat_alt_km: float, obs_alt_km: float = 0.0,
+    obs_lat: float,
+    obs_lon: float,
+    sat_lat: float,
+    sat_lon: float,
+    sat_alt_km: float,
+    obs_alt_km: float = 0.0,
 ) -> float:
     """Compute elevation angle in degrees from observer to satellite nadir.
 
@@ -121,18 +134,55 @@ def compute_elevation(
     sat_lat_rad = math.radians(sat_lat)
     sat_lon_rad = math.radians(sat_lon)
     dlon = sat_lon_rad - obs_lon_rad
-    d_sigma = math.acos(max(-1.0, min(1.0,
+    d_sigma = math.acos(
+        max(
+            -1.0,
+            min(
+                1.0,
         math.sin(obs_lat_rad) * math.sin(sat_lat_rad)
         + math.cos(obs_lat_rad) * math.cos(sat_lat_rad) * math.cos(dlon),
-    )))
+            ),
+        )
+    )
     R = 6371.0
     R_obs = R + obs_alt_km
     Rs = R + sat_alt_km
     slant_km = math.sqrt(Rs**2 + R_obs**2 - 2 * Rs * R_obs * math.cos(d_sigma))
-    try:
-        return math.degrees(math.asin((Rs * math.cos(d_sigma) - R_obs) / slant_km))
-    except Exception:
+    if slant_km == 0.0:
         return 0.0
+    sin_el = (Rs * math.cos(d_sigma) - R_obs) / slant_km
+    return math.degrees(math.asin(max(-1.0, min(1.0, sin_el))))
+
+
+def compute_elevation_vec(
+    obs_lat,
+    obs_lon,
+    sat_lat,
+    sat_lon,
+    sat_alt_km,
+    obs_alt_km=0.0,
+) -> np.ndarray:
+    """Vectorized spherical-Earth elevation angle in degrees."""
+    r_earth_km = 6371.0
+    obs_alt_arr = np.asarray(obs_alt_km, dtype=np.float64)
+    sat_alt_arr = np.asarray(sat_alt_km, dtype=np.float64)
+    r_obs = r_earth_km + obs_alt_arr
+    r_sat = r_earth_km + sat_alt_arr
+
+    obs_lat_rad = np.radians(obs_lat)
+    obs_lon_rad = np.radians(obs_lon)
+    sat_lat_rad = np.radians(sat_lat)
+    sat_lon_rad = np.radians(sat_lon)
+    dlon = sat_lon_rad - obs_lon_rad
+
+    cos_d_sigma = np.sin(obs_lat_rad) * np.sin(sat_lat_rad) + np.cos(
+        obs_lat_rad
+    ) * np.cos(sat_lat_rad) * np.cos(dlon)
+    d_sigma = np.arccos(np.clip(cos_d_sigma, -1.0, 1.0))
+    slant_km = np.sqrt(r_sat**2 + r_obs**2 - 2.0 * r_sat * r_obs * np.cos(d_sigma))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sin_el = (r_sat * np.cos(d_sigma) - r_obs) / slant_km
+    return np.degrees(np.arcsin(np.clip(sin_el, -1.0, 1.0)))
 
 
 def compute_elevation_vec(
@@ -181,7 +231,9 @@ def teme_to_ecef(x: float, y: float, z: float, jd: float) -> tuple[float, float,
     return cos_t * x + sin_t * y, -sin_t * x + cos_t * y, z
 
 
-def teme_vel_to_ecef(vx: float, vy: float, vz: float, jd: float) -> tuple[float, float, float]:
+def teme_vel_to_ecef(
+    vx: float, vy: float, vz: float, jd: float
+) -> tuple[float, float, float]:
     """Convert TEME velocity (km/s) to ECEF (km/s) using Earth rotation at Julian date jd."""
     try:
         from sgp4.propagation import gstime
@@ -193,7 +245,9 @@ def teme_vel_to_ecef(vx: float, vy: float, vz: float, jd: float) -> tuple[float,
     return cos_t * vx + sin_t * vy, -sin_t * vx + cos_t * vy, vz
 
 
-def latlon_to_ecef(lat_deg: float, lon_deg: float, alt_km: float = 0.0) -> tuple[float, float, float]:
+def latlon_to_ecef(
+    lat_deg: float, lon_deg: float, alt_km: float = 0.0
+) -> tuple[float, float, float]:
     """Convert lat/lon/altitude to ECEF Cartesian coordinates (km), spherical Earth model.
 
     Returns (x, y, z) in km. Uses R=6371 km sphere — appropriate for RF link

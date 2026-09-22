@@ -29,6 +29,13 @@ from .clutter import (
     ClutterLookup,
     LookupState,
     LOOKUP_STATE_TO_CODE,
+import requests
+
+from .clutter import (
+    CACHEABLE_LOOKUP_STATES,
+    CLUTTER_CLASS_NONE,
+    LOOKUP_STATE_TO_CODE,
+    LookupState,
 )
 from .defaults import (
     CLUTTER_CLASS_LABELS,
@@ -131,7 +138,9 @@ def _load_tiles_not_on_s3() -> None:
                 data = json.loads(_TILES_NOT_ON_S3_PATH.read_text())
                 if isinstance(data, list):
                     _TILES_NOT_ON_S3.update(data)
-                    logger.debug("Loaded %d known-absent S3 tiles from cache", len(data))
+                    logger.debug(
+                        "Loaded %d known-absent S3 tiles from cache", len(data)
+                    )
         except Exception as exc:
             logger.warning("Could not load tiles_not_on_s3 cache: %s", exc)
 
@@ -375,6 +384,9 @@ def _coerce_lookup(lookup) -> ClutterLookup:
         state, class_id, label = lookup
         return ClutterLookup(
             lookup_state=state if isinstance(state, LookupState) else LookupState(str(state)),
+            lookup_state=state
+            if isinstance(state, LookupState)
+            else LookupState(str(state)),
             class_id=class_id,
             class_label=str(label),
         )
@@ -440,6 +452,18 @@ def lookup_clutter_arr(
         state_out[idx] = LOOKUP_STATE_TO_CODE[lookup_result.lookup_state]
     return class_out, state_out
 
+
+def lookup_class_labels_arr(class_arr, state_arr) -> np.ndarray:
+    """Return WorldCover class labels for class/state arrays from lookup_clutter_arr."""
+    classes, states = np.broadcast_arrays(np.asarray(class_arr), np.asarray(state_arr))
+    labels = np.full(classes.shape, "Unknown", dtype=object)
+    class_code = LOOKUP_STATE_TO_CODE[LookupState.CLASS]
+    class_mask = states == class_code
+    for idx in np.argwhere(class_mask):
+        key = tuple(idx)
+        class_id = int(classes[key])
+        labels[key] = CLUTTER_CLASS_LABELS.get(class_id, f"Unknown ({class_id})")
+    return labels
 
 def ensure_worldcover_tile(
     lat: float,
@@ -521,7 +545,9 @@ def ensure_worldcover_tile(
                     with _TILES_NOT_ON_S3_LOCK:
                         _TILES_NOT_ON_S3.add(tile_name)
                         _save_tiles_not_on_s3()
-                    logger.debug("WorldCover tile not on S3 (ocean/uncovered): %s", tile_name)
+                    logger.debug(
+                        "WorldCover tile not on S3 (ocean/uncovered): %s", tile_name
+                    )
                     return None
                 if r.status_code != 200:
                     raise RuntimeError(
@@ -760,7 +786,8 @@ def prefetch_tiles_for_bbox(
     prefetch_ok = False
     try:
         already_local = sum(
-            1 for tlat, tlon in tile_points
+            1
+            for tlat, tlon in tile_points
             if (worldcover_dir / get_tile_name(tlat, tlon)).exists()
                or _is_tile_not_on_s3(get_tile_name(tlat, tlon))
         )
@@ -784,7 +811,9 @@ def prefetch_tiles_for_bbox(
             max_workers=num_workers, thread_name_prefix="wc-prefetch"
         ) as pool:
             futures = {
-                pool.submit(ensure_worldcover_tile, tlat, tlon, worldcover_dir, bbox=bbox): (tlat, tlon)
+                pool.submit(
+                    ensure_worldcover_tile, tlat, tlon, worldcover_dir, bbox=bbox
+                ): (tlat, tlon)
                 for tlat, tlon in tile_points
             }
             for future in as_completed(futures):
@@ -838,7 +867,11 @@ def load_country_boundary(
     if state_code:
         boundary_path = boundaries_dir / country_code / f"{state_code}.geojson"
         if not boundary_path.exists() and "_" in state_code:
-            boundary_path = boundaries_dir / country_code / f"{state_code.replace('_', ' ')}.geojson"
+            boundary_path = (
+                boundaries_dir
+                / country_code
+                / f"{state_code.replace('_', ' ')}.geojson"
+            )
         label = f"{state_code.replace('_', ' ').title()}, {country_code.title()}"
     else:
         boundary_path = boundaries_dir / f"{country_code}.geojson"
