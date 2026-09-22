@@ -26,15 +26,6 @@ from typing import Callable
 from .clutter import (
     CACHEABLE_LOOKUP_STATES,
     CLUTTER_CLASS_NONE,
-    ClutterLookup,
-    LookupState,
-    LOOKUP_STATE_TO_CODE,
-import numpy as np
-import requests
-
-from .clutter import (
-    CACHEABLE_LOOKUP_STATES,
-    CLUTTER_CLASS_NONE,
     LOOKUP_STATE_TO_CODE,
     ClutterLookup,
     LookupState,
@@ -385,7 +376,6 @@ def _coerce_lookup(lookup) -> ClutterLookup:
     if isinstance(lookup, tuple) and len(lookup) == 3:
         state, class_id, label = lookup
         return ClutterLookup(
-            lookup_state=state if isinstance(state, LookupState) else LookupState(str(state)),
             lookup_state=state
             if isinstance(state, LookupState)
             else LookupState(str(state)),

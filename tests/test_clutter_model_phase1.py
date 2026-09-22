@@ -7,26 +7,23 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from astra_shared.defaults import (
-    CLUTTER_ELEV_FLOOR_DEG,
-    CLUTTER_LOSS_DB,
 from astra_shared.clutter import (
+    _branch_codes_for_class_arr,
+    _p2108_core,
+    _p833_core,
+    _p833_depth_m,
     CLASS_TO_BRANCH,
     CLUTTER_BRANCH_NONE,
-    CLUTTER_BRANCH_P833,
     CLUTTER_BRANCH_P2108,
+    CLUTTER_BRANCH_P833,
     CLUTTER_CLASS_NONE,
     ClutterBranch,
     ClutterConfig,
     ClutterModel,
-    _branch_codes_for_class_arr,
-    _p833_core,
-    _p833_depth_m,
-    _p2108_core,
-    clutter_loss_p833,
-    clutter_loss_p833_arr,
     clutter_loss_p2108,
     clutter_loss_p2108_arr,
+    clutter_loss_p833,
+    clutter_loss_p833_arr,
     evaluate_clutter_arr,
     evaluate_clutter_loss,
     make_clutter_arr_evaluator,
@@ -41,34 +38,6 @@ from astra_shared.defaults import (
     P2108_F_VALID_GHZ,
     P_MIN_PCT,
 )
-from astra_shared.clutter import (
-    _branch_codes_for_class_arr,
-    _p2108_core,
-    _p833_core,
-    _p833_depth_m,
-    CLASS_TO_BRANCH,
-    CLUTTER_BRANCH_NONE,
-    CLUTTER_BRANCH_P2108,
-    CLUTTER_BRANCH_P833,
-    CLUTTER_CLASS_NONE,
-    ClutterBranch,
-    ClutterConfig,
-    ClutterModel,
-    clutter_loss_p2108,
-    clutter_loss_p2108_arr,
-    clutter_loss_p833,
-    clutter_loss_p833_arr,
-    evaluate_clutter_arr,
-    evaluate_clutter_loss,
-    make_clutter_arr_evaluator,
-)
-from astra_shared.geo_math import compute_elevation, compute_elevation_vec
-from astra_shared.worldcover import (
-    _CLUTTER_CACHE,
-    _coerce_lookup,
-    ClutterLookup,
-    LOOKUP_STATE_TO_CODE,
-    LookupState,
 from astra_shared.geo_math import compute_elevation, compute_elevation_vec
 from astra_shared.worldcover import (
     _CLUTTER_CACHE,
@@ -136,15 +105,6 @@ def _ntia_aeronautical_model(f_ghz, theta_deg, p, q_inverse):
     return (-k_1 * part1 * (1 / math.tan(part2))) ** part3 - 1 - part4
 
 
-@pytest.mark.parametrize(("f_ghz", "elev_deg", "p_pct", "published"), P2108_REFERENCE_VECTORS)
-def test_p2108_matches_ntia_equation_exactly(f_ghz, elev_deg, p_pct, published):
-    """Same equation as NTIA's code, with the inverse normal made exact: 1e-9."""
-    reference = _ntia_aeronautical_model(f_ghz, elev_deg, p_pct, _ntia_q_inverse_exact)
-    assert clutter_loss_p2108(f_ghz, elev_deg, p_pct) == pytest.approx(reference, abs=1e-9)
-
-
-@pytest.mark.parametrize(("f_ghz", "elev_deg", "p_pct", "published"), P2108_REFERENCE_VECTORS)
-def test_p2108_matches_ntia_code_within_its_approximation(f_ghz, elev_deg, p_pct, published):
 @pytest.mark.parametrize(
     ("f_ghz", "elev_deg", "p_pct", "published"), P2108_REFERENCE_VECTORS
 )
@@ -304,7 +264,6 @@ def test_monotonicity_and_documented_canopy_zenith_reversal():
     reversal_values = [
         clutter_loss_p833(0.5, 90.0, float(p))
         for p in (20.0, 49.4, 80.0, 99.9)
-        clutter_loss_p833(0.5, 90.0, float(p)) for p in (20.0, 49.4, 80.0, 99.9)
     ]
     assert reversal_values[1] > reversal_values[0]
     assert reversal_values[1] > reversal_values[2]
@@ -505,7 +464,6 @@ def test_evaluator_routes_disabled_frequency_and_classes():
     assert evaluate_clutter_loss(missing, cfg, 20e9, 20.0).loss_db == 0.0
     assert (
         evaluate_clutter_loss(
-            ClutterLookup(lookup_state=LookupState.CLASS, class_id=999, class_label="Unknown (999)"),
             ClutterLookup(
                 lookup_state=LookupState.CLASS,
                 class_id=999,
@@ -589,17 +547,6 @@ def test_scalar_evaluator_rejects_swapped_tuple_and_unknown_state():
         evaluate_clutter_loss((50, LookupState.CLASS, "Built-up"), ClutterConfig(), 20e9, 20.0)
     with pytest.raises(ValueError, match="unsupported lookup state"):
         evaluate_clutter_loss(ClutterLookup("bogus", 50, "Built-up"), ClutterConfig(), 20e9, 20.0)
-
-
-def test_evaluator_does_not_hide_invalid_elevation_sentinels():
-    built = ClutterLookup(lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up")
-        evaluate_clutter_loss(
-            (50, LookupState.CLASS, "Built-up"), ClutterConfig(), 20e9, 20.0
-        )
-    with pytest.raises(ValueError, match="unsupported lookup state"):
-        evaluate_clutter_loss(
-            ClutterLookup("bogus", 50, "Built-up"), ClutterConfig(), 20e9, 20.0
-        )
 
 
 def test_evaluator_does_not_hide_invalid_elevation_sentinels():
@@ -720,8 +667,6 @@ _OFF_ZENITH = np.array([5.0, 12.5, 30.0, 60.0, 85.0])
         (clutter_loss_p833_arr, clutter_loss_p833),
     ],
 )
-def test_array_helpers_match_scalar_away_from_the_median(array_helper, scalar_helper, f_ghz, p_pct):
-    loss, mask = array_helper(f_ghz, _OFF_ZENITH, np.ones(_OFF_ZENITH.size, dtype=bool), p_pct)
 def test_array_helpers_match_scalar_away_from_the_median(
     array_helper, scalar_helper, f_ghz, p_pct
 ):
@@ -750,12 +695,6 @@ def test_the_percentile_changes_the_answer_at_every_checked_point():
 @pytest.mark.parametrize("p_pct", _OFF_MEDIAN)
 @pytest.mark.parametrize(
     ("class_id", "helper"), [(50, clutter_loss_p2108), (10, clutter_loss_p833), (95, clutter_loss_p833)]
-)
-def test_scalar_evaluator_uses_the_configured_percentile(class_id, helper, p_pct):
-    lookup = ClutterLookup(LookupState.CLASS, class_id, "x")
-    result = evaluate_clutter_loss(lookup, ClutterConfig(clutter_percentile=p_pct), 20e9, 20.0)
-    ("class_id", "helper"),
-    [(50, clutter_loss_p2108), (10, clutter_loss_p833), (95, clutter_loss_p833)],
 )
 def test_scalar_evaluator_uses_the_configured_percentile(class_id, helper, p_pct):
     lookup = ClutterLookup(LookupState.CLASS, class_id, "x")
@@ -828,7 +767,6 @@ def test_scalar_evaluator_short_circuits_outside_the_window(class_id, freq_hz):
 @pytest.mark.parametrize("freq_hz", _OUTSIDE_WINDOW_HZ)
 def test_array_evaluator_short_circuits_outside_the_window(freq_hz):
     loss, mask = evaluate_clutter_arr(
-        [50, 10, 95], [LookupState.CLASS] * 3, [20.0, 20.0, 20.0], [True] * 3, ClutterConfig(), freq_hz
         [50, 10, 95],
         [LookupState.CLASS] * 3,
         [20.0, 20.0, 20.0],
@@ -907,12 +845,6 @@ def test_disabled_config_carries_no_percentile():
     loss, mask = evaluate_clutter_arr(
         [50, 10], [LookupState.CLASS, LookupState.CLASS], [20.0, -30.0], [True, False],
         ClutterConfig("disabled", None), 20e9,
-        [50, 10],
-        [LookupState.CLASS, LookupState.CLASS],
-        [20.0, -30.0],
-        [True, False],
-        ClutterConfig("disabled", None),
-        20e9,
     )
     assert loss.tolist() == [0.0, 0.0]
     assert mask.tolist() == [True, False]
@@ -928,9 +860,6 @@ def test_clutter_config_validates_percentile_at_construction():
     assert ClutterConfig(clutter_percentile="50").clutter_percentile == 50.0
 
 
-def test_unknown_class_is_derived_above_lookup():
-    result = evaluate_clutter_loss(
-        ClutterLookup(lookup_state=LookupState.CLASS, class_id=999, class_label="Unknown (999)"),
 def test_phase2_interim_config_builder_is_the_single_boolean_adapter():
     enabled = build_interim_clutter_config(
         {"clutter_enable": True, "clutter_percentile": "80"}
@@ -970,7 +899,6 @@ def test_lookup_clutter_arr_uses_metadata_cache_for_repeated_coordinates():
     clear_clutter_cache()
     with patch(
         "astra_shared.worldcover.fetch_worldcover_class",
-        return_value=ClutterLookup(lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up"),
         return_value=ClutterLookup(
             lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up"
         ),
@@ -1067,7 +995,6 @@ def test_lookup_clutter_arr_uses_numeric_none_sentinel():
     clear_clutter_cache()
     with patch(
         "astra_shared.worldcover.fetch_worldcover_class",
-        return_value=ClutterLookup(lookup_state=LookupState.TILE_MISSING, class_id=None, class_label="Unknown"),
         return_value=ClutterLookup(
             lookup_state=LookupState.TILE_MISSING, class_id=None, class_label="Unknown"
         ),
@@ -1096,7 +1023,6 @@ def test_table_wrappers_accept_custom_table_keywords_until_consumers_move():
     clear_clutter_cache()
     with patch(
         "astra_shared.worldcover.fetch_worldcover_class",
-        return_value=ClutterLookup(lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up"),
         return_value=ClutterLookup(
             lookup_state=LookupState.CLASS, class_id=50, class_label="Built-up"
         ),
@@ -1128,7 +1054,6 @@ def test_table_wrappers_use_default_table_values_until_consumers_move():
     clear_clutter_cache()
     with patch(
         "astra_shared.worldcover.fetch_worldcover_class",
-        return_value=ClutterLookup(lookup_state=LookupState.CLASS, class_id=10, class_label="Tree cover"),
         return_value=ClutterLookup(
             lookup_state=LookupState.CLASS, class_id=10, class_label="Tree cover"
         ),
@@ -1351,7 +1276,6 @@ def test_real_fetch_zero_pixel_is_no_data(monkeypatch, real_fetch):
     assert result.class_id is None
 
 
-@pytest.mark.parametrize(("value", "label"), [(50, "Built-up"), (10, "Tree cover"), (999, "Unknown (999)")])
 @pytest.mark.parametrize(
     ("value", "label"), [(50, "Built-up"), (10, "Tree cover"), (999, "Unknown (999)")]
 )
@@ -1384,14 +1308,6 @@ def test_real_fetch_downloaded_tile_is_read(monkeypatch, real_fetch, tmp_path):
 @pytest.mark.parametrize(
     ("setup", "cached"),
     [("read_error", False), ("download_error", False), ("not_published", True), ("zero_pixel", True)],
-)
-def test_real_failures_reach_the_cache_correctly(monkeypatch, real_fetch, tmp_path, setup, cached):
-    [
-        ("read_error", False),
-        ("download_error", False),
-        ("not_published", True),
-        ("zero_pixel", True),
-    ],
 )
 def test_real_failures_reach_the_cache_correctly(
     monkeypatch, real_fetch, tmp_path, setup, cached
@@ -1440,7 +1356,6 @@ def test_lookup_clutter_arr_passes_download_if_missing_through(monkeypatch):
         return ClutterLookup(LookupState.TILE_MISSING, None, "Unknown")
 
     monkeypatch.setattr(_wc, "fetch_worldcover_class", fake_fetch)
-    lookup_clutter_arr(np.array([1.0, 2.0]), np.array([3.0, 4.0]), download_if_missing=False)
     lookup_clutter_arr(
         np.array([1.0, 2.0]), np.array([3.0, 4.0]), download_if_missing=False
     )
@@ -1463,9 +1378,6 @@ def test_array_evaluator_honours_the_callers_visibility_mask():
     states = [LookupState.CLASS] * 6
     elev = np.array([-30.0, -30.0, 3.0, 3.0, 20.0, 20.0])
     visible = np.array([False, False, False, False, True, True])
-    loss, mask = evaluate_clutter_arr(classes, states, elev, visible, ClutterConfig(), 20e9)
-    assert loss.tolist() == pytest.approx(
-        [0.0, 0.0, 0.0, 0.0, clutter_loss_p2108(20.0, 20.0, 50.0), clutter_loss_p833(20.0, 20.0, 50.0)],
     loss, mask = evaluate_clutter_arr(
         classes, states, elev, visible, ClutterConfig(), 20e9
     )
@@ -1492,7 +1404,6 @@ def test_array_evaluator_honours_the_callers_visibility_mask():
 def test_disabled_scalar_evaluator_produces_no_branch(class_id):
     """Spec section 5.4: disabled means no clutter term at all, and the branch says so."""
     result = evaluate_clutter_loss(
-        ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig("disabled", None), 20e9, 20.0
         ClutterLookup(LookupState.CLASS, class_id, "x"),
         ClutterConfig("disabled", None),
         20e9,
@@ -1509,14 +1420,6 @@ def test_disabled_scalar_evaluator_produces_no_branch(class_id):
 )
 def test_array_matches_scalar_at_tiny_percentiles(array_helper, scalar_helper, p_pct):
     """Spec section 5.2 item 6: both forms give the same value, including where cancellation bites."""
-    loss, _ = array_helper(20.0, _OFF_ZENITH, np.ones(_OFF_ZENITH.size, dtype=bool), p_pct)
-    [
-        (clutter_loss_p2108_arr, clutter_loss_p2108),
-        (clutter_loss_p833_arr, clutter_loss_p833),
-    ],
-)
-def test_array_matches_scalar_at_tiny_percentiles(array_helper, scalar_helper, p_pct):
-    """Spec section 5.2 item 6: both forms give the same value, including where cancellation bites."""
     loss, _ = array_helper(
         20.0, _OFF_ZENITH, np.ones(_OFF_ZENITH.size, dtype=bool), p_pct
     )
@@ -1524,11 +1427,6 @@ def test_array_matches_scalar_at_tiny_percentiles(array_helper, scalar_helper, p
     assert loss.tolist() == pytest.approx(expected, abs=1e-9)
 
 
-@pytest.mark.parametrize(("class_id", "freq_hz"), [(80, 20e9), (30, 20e9), (50, 120e9), (50, 0.3e9)])
-def test_evaluator_refuses_above_zenith_without_help_from_a_helper(class_id, freq_hz):
-    """The evaluator's own bound: open ground and out-of-window runs never reach a helper."""
-    with pytest.raises(ValueError, match="elevation outside 0-90 degrees"):
-        evaluate_clutter_loss(ClutterLookup(LookupState.CLASS, class_id, "x"), ClutterConfig(), freq_hz, 120.0)
 @pytest.mark.parametrize(
     ("class_id", "freq_hz"), [(80, 20e9), (30, 20e9), (50, 120e9), (50, 0.3e9)]
 )
@@ -1546,9 +1444,6 @@ def test_evaluator_refuses_above_zenith_without_help_from_a_helper(class_id, fre
 # ----------------------------------------------------------------------------
 # Round-3 review: paths production runs that nothing exercised.
 # ----------------------------------------------------------------------------
-
-def test_real_fetch_installed_tile_not_yet_known_is_read(monkeypatch, real_fetch, tmp_path):
-
 def test_real_fetch_installed_tile_not_yet_known_is_read(
     monkeypatch, real_fetch, tmp_path
 ):
@@ -1618,7 +1513,6 @@ def test_bound_array_evaluator_keeps_its_own_frequency(freq_hz):
     bound = make_clutter_arr_evaluator(ClutterConfig(), freq_hz)
     loss, _ = bound([50, 10], [LookupState.CLASS] * 2, [20.0, 20.0], [True, True])
     assert loss.tolist() == pytest.approx(
-        [clutter_loss_p2108(f_ghz, 20.0, 50.0), clutter_loss_p833(f_ghz, 20.0, 50.0)], abs=1e-12
         [clutter_loss_p2108(f_ghz, 20.0, 50.0), clutter_loss_p833(f_ghz, 20.0, 50.0)],
         abs=1e-12,
     )
@@ -1632,13 +1526,6 @@ def test_table_wrapper_unmapped_class_takes_the_custom_fallback(monkeypatch):
         lambda *a, **k: ClutterLookup(LookupState.CLASS, 999, "Unknown (999)"),
     )
     loss, label = clutter_loss_and_class(12.0, 77.0, loss_table={50: 8.0}, fallback_db=3.0)
-        _wc,
-        "fetch_worldcover_class",
-        lambda *a, **k: ClutterLookup(LookupState.CLASS, 999, "Unknown (999)"),
-    )
-    loss, label = clutter_loss_and_class(
-        12.0, 77.0, loss_table={50: 8.0}, fallback_db=3.0
-    )
     assert loss == 3.0
     assert label == "Unknown (999)"
     clear_clutter_cache()

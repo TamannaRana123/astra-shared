@@ -4,7 +4,18 @@ from astra_shared.custom_antenna_schema import (
     default_custom_antenna,
     normalize_custom_antenna,
 )
-from astra_shared.param_parsing import _parse_custom_antenna_payload, parse_rf_params
+from astra_shared.param_parsing import _get_float_pair, _parse_custom_antenna_payload, parse_rf_params
+
+
+def test_get_float_pair_preserves_requested_value_and_clamps_once():
+    assert _get_float_pair({"step": "0.1"}, "step", 25.0, min_val=0.25, max_val=100.0) == (0.1, 0.25)
+    assert _get_float_pair({"step": "200"}, "step", 25.0, min_val=0.25, max_val=100.0) == (200.0, 100.0)
+    assert _get_float_pair({"step": "0.25"}, "step", 25.0, min_val=0.25, max_val=100.0) == (0.25, 0.25)
+
+
+def test_get_float_pair_uses_default_for_non_finite_or_invalid_values():
+    for value in (None, "", "bad", "NaN", "inf", "-inf"):
+        assert _get_float_pair({"step": value}, "step", 25.0, min_val=0.25, max_val=100.0) == (25.0, 25.0)
 
 
 def test_parse_rf_params_accepts_custom_antenna_json_string_payload():

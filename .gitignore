@@ -1,5 +1,6 @@
 *.pyc
 __pycache__/
+# Local input datasets (e.g. ESA WorldCover tiles); large binaries, not versioned
 data/
 build/
 *.egg-info/
