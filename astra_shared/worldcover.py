@@ -29,12 +29,14 @@ from .clutter import (
     ClutterLookup,
     LookupState,
     LOOKUP_STATE_TO_CODE,
+import numpy as np
 import requests
 
 from .clutter import (
     CACHEABLE_LOOKUP_STATES,
     CLUTTER_CLASS_NONE,
     LOOKUP_STATE_TO_CODE,
+    ClutterLookup,
     LookupState,
 )
 from .defaults import (
@@ -464,6 +466,7 @@ def lookup_class_labels_arr(class_arr, state_arr) -> np.ndarray:
         class_id = int(classes[key])
         labels[key] = CLUTTER_CLASS_LABELS.get(class_id, f"Unknown ({class_id})")
     return labels
+
 
 def ensure_worldcover_tile(
     lat: float,
